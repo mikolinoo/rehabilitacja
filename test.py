@@ -1,13 +1,11 @@
 import sys
 import numpy as np
-import cv2                      # OpenCV – tylko sprawdzamy, czy się importuje
+import cv2
 import pyqtgraph as pg
 from PySide6.QtWidgets import QApplication, QMainWindow
 
 
 class OknoTestowe(QMainWindow):
-    """Główne okno. Dziedziczy po QMainWindow, czyli dostaje
-    'za darmo' wszystko, co ma typowe okno (pasek tytułu, menu itd.)."""
 
     def __init__(self):
         super().__init__()                      # uruchom konstruktor QMainWindow
