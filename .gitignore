@@ -4,5 +4,5 @@ __pycache__/
 *.mp4
 *.avi
 CLAUDE.md
-gui_data_format.py
+GUI/gui_data_format.py
 plan_gui.md
