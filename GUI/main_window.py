@@ -23,7 +23,7 @@ class MainWindow(QMainWindow):
     """Główne okno aplikacji.
 
     QMainWindow ma gotowe miejsca na pasek narzędzi, pasek stanu
-    i jeden widżet centralny, czyli cały środek okna.
+    i jeden widżet centralny.
     """
 
     # Sygnały z GUI do workera. Okno wysyła sygnał, a worker odbiera go w swoim wątku.

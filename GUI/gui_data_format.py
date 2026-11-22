@@ -1,29 +1,4 @@
-"""Format danych przekazywanych z workera do GUI.
-
-Format jest LUŹNY: każde pole może być None albo nieobecne. Widżety muszą
-sobie z tym poradzić (np. brak osoby w kadrze, brak jednego stawu).
-
-Przykład wyniku jednej klatki (słownik = dict w Pythonie):
-
-    {
-        "frame_idx": 123,                     # numer klatki (od 0)
-        "timestamp": 4.10,                    # czas w sekundach – z nagrania, nie z numeru klatki
-        "angles": {                           # kąty w stopniach, None gdy brak stawu
-            "elbow": {"L": 145.2, "R": 120.8},
-            "shoulder": None,
-        },
-        "si": {                               # wskaźnik symetrii w %, 0 = pełna symetria
-            "elbow": 18.3,
-            "shoulder": None,
-            "total": 7.0,
-        },
-        "landmarks": [(x, y, visibility), ...],  # punkty szkieletu, x i y zwykle 0–1
-    }                                         # albo None, gdy brak osoby w kadrze
-
-Przykład zdarzenia (asymetrii):
-
-    {"start": 3.2, "end": 4.9, "joint": "elbow", "level": "warning", "si_max": 24.1}
-"""
+"""Format danych przekazywanych z workera do GUI. Opis: docs/format_danych_gui.md."""
 
 # Stawy, dla których atrapa liczy kąty i SI.
 DEFAULT_JOINTS = ["shoulder", "elbow", "hip", "knee"]
