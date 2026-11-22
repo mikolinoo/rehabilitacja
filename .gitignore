@@ -3,6 +3,6 @@ __pycache__/
 .idea/
 *.mp4
 *.avi
-CLAUDE.md
+*.csv
+*.md
 GUI/gui_data_format.py
-plan_gui.md
