@@ -3,7 +3,7 @@
 # Stawy, dla których atrapa liczy kąty i SI.
 DEFAULT_JOINTS = ["shoulder", "elbow", "hip", "knee"]
 
-# Liczba punktów szkieletu w MediaPipe Pose (stała z biblioteki, nie wymysł GUI).
+# Liczba punktów szkieletu w MediaPipe Pose (stała z biblioteki).
 LICZBA_LANDMARKS = 33
 
 # Dozwolone poziomy zdarzenia.
