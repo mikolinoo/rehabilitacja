@@ -19,6 +19,11 @@ NAZWY_STAWOW = {"shoulder": "bark", "elbow": "łokieć", "hip": "biodro", "knee"
 
 NAGLOWKI = ["Staw", "L [°]", "P [°]", "SI [%]", "Status"]
 BRAK = "—"  # znak pokazywany zamiast wartości, której nie ma
+KOLOR_WYSZARZONY = "#9e9e9e"  # wartość L/P/SI stawu, który nie jest analizowany
+TLO_NAZW_STAWOW = "#37474f"  # ciemne tło kolumny „Staw”, żeby biały napis był widoczny
+KOLOR_NAZWY = "#ffffff"  # napis nazwy analizowanego stawu
+KOLOR_NAZWY_WYSZARZONEJ = "#b0bec5"  # napis nazwy stawu nieanalizowanego (jaśniejszy szary)
+KOLOR_KATOW = "#eceff1"  # napis wartości kątów L/P analizowanego stawu (jasny, na ciemnym tle)
 
 
 def formatuj(wartosc, miejsca):
@@ -32,7 +37,7 @@ class SidePanel(QWidget):
     """Panel boczny: symetria ogólna, tabela kątów i SI oraz lista ostrzeżeń.
 
     Panel tylko pokazuje gotowe dane z wyniku klatki (angles i si). Nic nie liczy.
-    Odświeża go MainWindow timerem, a nie przy każdej klatce.
+    Odświeża go MainWindow przy każdej klatce z workera.
     """
 
     def __init__(self, parent=None):
@@ -40,6 +45,7 @@ class SidePanel(QWidget):
         self._warning = PROG_OSTRZEZENIA_DOMYSLNY
         self._alarm = PROG_ALARMU_DOMYSLNY
         self._ostatni_wynik = None  # zapamiętany wynik, żeby po zmianie progów przerysować panel
+        self._analizowane = set(DEFAULT_JOINTS)  # stawy, które użytkownik wybrał do analizy
 
         # Napis na górze z symetrią ogólną; tło zmienia kolor wg progów
         self._etykieta_total = QLabel(f"Symetria ogólna: {BRAK}")
@@ -58,6 +64,7 @@ class SidePanel(QWidget):
         # Nazwy stawów wpisujemy raz, bo się nie zmieniają. Wartości idą w pokaz_wynik().
         for wiersz, staw in enumerate(DEFAULT_JOINTS):
             self._tabela.setItem(wiersz, 0, QTableWidgetItem(NAZWY_STAWOW.get(staw, staw)))
+            self._ustaw_nazwe(wiersz, staw)
 
         self._lista_ostrzezen = QListWidget()  # na razie pusta, wypełni ją zadanie 8
 
@@ -88,11 +95,24 @@ class SidePanel(QWidget):
             kat_p = bezpieczny_odczyt(wynik, "angles", staw, "R")
             si = bezpieczny_odczyt(wynik, "si", staw)
             _, (tlo, tekst_kolor), status = ocena_si(si, self._warning, self._alarm)
+            # Kąty L/P: tło jak kolumna „Staw”, jasny napis. Staw nieanalizowany: napis szary.
+            kolor_kata = KOLOR_KATOW if staw in self._analizowane else KOLOR_WYSZARZONY
+            # Staw nieanalizowany: tekst SI i Status szary, tło zostaje z oceny (zwykle „—”)
+            if staw not in self._analizowane:
+                tekst_kolor = KOLOR_WYSZARZONY
 
-            self._ustaw_komorke(wiersz, 1, formatuj(kat_l, 0))
-            self._ustaw_komorke(wiersz, 2, formatuj(kat_p, 0))
+            self._ustaw_komorke(wiersz, 1, formatuj(kat_l, 0), TLO_NAZW_STAWOW, kolor_kata)
+            self._ustaw_komorke(wiersz, 2, formatuj(kat_p, 0), TLO_NAZW_STAWOW, kolor_kata)
             self._ustaw_komorke(wiersz, 3, formatuj(si, 1), tlo, tekst_kolor)
             self._ustaw_komorke(wiersz, 4, status, tlo, tekst_kolor)
+
+    def ustaw_stawy(self, analizowane):
+        """Zaznacza, które stawy są analizowane. Pozostałe wiersze są wyszarzone."""
+        self._analizowane = set(analizowane)
+        for wiersz, staw in enumerate(DEFAULT_JOINTS):
+            self._ustaw_nazwe(wiersz, staw)
+        if self._ostatni_wynik is not None:
+            self.pokaz_wynik(self._ostatni_wynik)  # przerysowujemy, żeby kolory były od razu poprawne
 
     def ustaw_progi(self, warning, alarm):
         """Zmienia progi. Jeśli panel coś pokazuje, przerysowuje go z nowymi kolorami."""
@@ -109,6 +129,13 @@ class SidePanel(QWidget):
     # ------------------------------------------------------------------
     # Pomocnicze
     # ------------------------------------------------------------------
+    def _ustaw_nazwe(self, wiersz, staw):
+        """Kolumna „Staw”: ciemne tło, a napis biały (analizowany) albo jasnoszary (nieanalizowany)."""
+        nazwa = self._tabela.item(wiersz, 0)
+        nazwa.setBackground(QColor(TLO_NAZW_STAWOW))
+        kolor = KOLOR_NAZWY if staw in self._analizowane else KOLOR_NAZWY_WYSZARZONEJ
+        nazwa.setForeground(QColor(kolor))
+
     def _ustaw_komorke(self, wiersz, kolumna, tekst, tlo=None, tekst_kolor=None):
         """Wpisuje tekst do jednej komórki tabeli. Kolory są opcjonalne."""
         komorka = QTableWidgetItem(tekst)

@@ -1,13 +1,14 @@
-from collections import deque
 from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QMetaObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QSplitter, QToolBar
+from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QSplitter, QToolBar, QVBoxLayout, QWidget
 
 from GUI.gui_data_format import bezpieczny_odczyt
 from GUI.mock_worker import MockWorker
+from GUI.seek_bar import SeekBar
+from GUI.settings_panel import SettingsPanel
 from GUI.side_panel import SidePanel
 from GUI.timeline_widget import TimelineWidget
 from GUI.video_widget import VideoWidget
@@ -18,6 +19,15 @@ MAX_PUNKTOW = 30 * 60 * 60
 
 # Domyślny folder okna wyboru pliku: <projekt>/data
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+def czas_na_klatke(czas_s, fps, liczba_klatek):
+    """Zamienia czas z wykresu na numer klatki i przycina do zakresu filmu.
+
+    Klatka N ma czas N / fps, więc odwrotnie: numer = czas · fps, zaokrąglony do pełnej klatki.
+    """
+    numer = round(czas_s * fps)
+    return min(max(numer, 0), liczba_klatek - 1)
 
 
 class MainWindow(QMainWindow):
@@ -32,36 +42,39 @@ class MainWindow(QMainWindow):
     sygnal_start = Signal()  # odtwarzanie (wznowienie)
     sygnal_stop = Signal()  # pauza
     sygnal_reset = Signal()  # od nowa, na pierwszą klatkę
+    sygnal_przewin = Signal(int)  # numer klatki, do której przewijamy
+    sygnal_ustawienia = Signal(dict)  # progi, typ ćwiczenia i stawy (format z format_danych_gui.md)
 
     def __init__(self):
         super().__init__()  # konstruktor QMainWindow; bez tego okno się nie zbuduje
         self.setWindowTitle("Analiza symetrii – rehabilitacja")
         self.resize(1100, 700)
 
-        # Bufor z wynikami kolejnych klatek (czas i SI), z których rysujemy wykres.
-        # deque z maxlen sam wyrzuca najstarsze wpisy, gdy zabraknie miejsca.
-        self._bufor_czas = deque(maxlen=MAX_PUNKTOW)
-        self._bufor_si = deque(maxlen=MAX_PUNKTOW)
+        # Wyniki klatek w słowniku {numer klatki: wynik}. Ponowne odczytanie tej samej klatki
+        # nadpisuje jej wpis zamiast dodawać duplikat. Słownik pamięta kolejność dodawania,
+        # więc pierwszy wpis to najstarszy (tego używamy przy usuwaniu nadmiaru).
+        self._wyniki = {}
+        self._wyniki_zmienione = False  # czy wykres trzeba przerysować przy najbliższym odświeżeniu
+        self._biezaca_klatka = 0  # numer klatki, którą właśnie pokazujemy
         self._ostatni_czas = 0.0
-        self._na_koncu = False  # True, gdy film dobiegł końca
-        # Ostatni pełny wynik klatki. Panel boczny odświeża się z niego co 100 ms, a nie przy każdej klatce.
-        self._ostatni_wynik = None
+        self._na_koncu = False  # True, gdy odtwarzanie dobiegło końca
 
         # Informacje o otwartym pliku. Ustawiamy je, gdy worker potwierdzi otwarcie.
         self._nazwa_pliku = None
         self._fps = None
         self._dlugosc = None  # w sekundach; None, gdy nieznana albo brak pliku
+        self._liczba_klatek = None  # None, gdy nieznana albo brak pliku
 
         self._utworz_pasek_narzedzi()
         self.setCentralWidget(self._utworz_uklad())
         self._utworz_pasek_stanu()
         self._utworz_watek()
         self._utworz_odswiezanie()
+        # Start aplikacji: worker i wykres dostają ustawienia z panelu, zanim ktokolwiek je zmieni
+        self._na_ustawienia(self._panel_ustawien.pobierz_ustawienia())
         self.statusBar().showMessage("Gotowe – otwórz plik wideo")
 
-    # ------------------------------------------------------------------
-    # Pasek narzędzi
-    # ------------------------------------------------------------------
+    # Pasek narzędzi----------
     def _utworz_pasek_narzedzi(self):
         pasek = QToolBar("Narzędzia")
         self.addToolBar(pasek)
@@ -89,11 +102,9 @@ class MainWindow(QMainWindow):
 
         pasek.addAction(QAction("Eksport", self))  # jeszcze bez działania
 
-    # ------------------------------------------------------------------
-    # Układ: trzy QSplitter zagnieżdżone w sobie
-    # ------------------------------------------------------------------
+    # Układ: trzy QSplitter zagnieżdżone w sobie--------------------
     def _utworz_uklad(self):
-        # Poziomy splitter: [wideo | panel boczny]
+        # Poziomy splitter: [wideo z suwakiem | panel boczny]
         gorna = QSplitter(Qt.Orientation.Horizontal)
         gorna.addWidget(self._utworz_panel_wideo())
         gorna.addWidget(self._utworz_panel_boczny())
@@ -117,25 +128,34 @@ class MainWindow(QMainWindow):
         boczny.setSizes([300, 150])
         return boczny
 
-    # ------------------------------------------------------------------
-    # Panele: wideo, wykres i zaślepki
-    # ------------------------------------------------------------------
+    # Panele: wideo, wykres i zaślepki-------------------------------
     def _utworz_panel_wideo(self):
-        # Zapamiętujemy panel w self, żeby móc w nim wyświetlać klatki z workera
+        # Wideo i pasek przewijania w jednej kolumnie: suwak jest pod obrazem
         self._wideo = VideoWidget()
-        return self._wideo
+        self._suwak = SeekBar()
+        self._suwak.przewinieto.connect(self._przewin_do_klatki)
+        panel = QWidget()
+        uklad = QVBoxLayout(panel)
+        uklad.setContentsMargins(0, 0, 0, 0)
+        uklad.addWidget(self._wideo, 1)  # obraz dostaje całą wolną wysokość
+        uklad.addWidget(self._suwak)
+        return panel
 
     def _utworz_panel_katow(self):
-        # Panel z kątami, SI i ostrzeżeniami. Zapamiętujemy go w self, żeby odświeżać go z timera.
+        # Panel z kątami, SI i ostrzeżeniami. Odświeżamy go przy każdej klatce.
         self._panel = SidePanel()
         return self._panel
 
     def _utworz_panel_ustawien(self):
-        return self._zaslepka("USTAWIENIA", "#fff3c4")
+        # Zapamiętujemy panel w self, żeby przy starcie pobrać z niego ustawienia początkowe
+        self._panel_ustawien = SettingsPanel()
+        self._panel_ustawien.ustawienia_zmienione.connect(self._na_ustawienia)
+        return self._panel_ustawien
 
     def _utworz_panel_timeline(self):
         # Prawdziwy wykres. Zapamiętujemy go w self, żeby odświeżać go z bufora.
         self._timeline = TimelineWidget()
+        self._timeline.kliknieto_czas.connect(self._na_klik_wykres)
         return self._timeline
 
     def _zaslepka(self, tekst, kolor):
@@ -148,7 +168,6 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     # Pasek stanu: po lewej komunikaty, po prawej stały licznik (nazwa, fps, czas)
-    # ------------------------------------------------------------------
     def _utworz_pasek_stanu(self):
         self._etykieta_czasu = QLabel("Czas: 0.0 s")
         # 'permanent' oznacza, że widżet nie znika razem z komunikatem
@@ -162,9 +181,7 @@ class MainWindow(QMainWindow):
             tekst = f"{self._nazwa_pliku} | {self._fps:.0f} fps | {czas} / {self._dlugosc:.1f} s"
         self._etykieta_czasu.setText(tekst)
 
-    # ------------------------------------------------------------------
-    # Wątek workera
-    # ------------------------------------------------------------------
+    # Wątek workera-------------------------------------------------
     def _utworz_watek(self):
         # QThread to osobny wątek, czyli równoległa ścieżka programu. Przenosimy do niego
         # workera, żeby odczyt i przetwarzanie wideo nie zamrażały okna.
@@ -178,6 +195,8 @@ class MainWindow(QMainWindow):
         self.sygnal_start.connect(self._worker.start)
         self.sygnal_stop.connect(self._worker.stop)
         self.sygnal_reset.connect(self._worker.reset)
+        self.sygnal_przewin.connect(self._worker.seek)
+        self.sygnal_ustawienia.connect(self._worker.set_settings)
 
         # worker -> GUI
         self._worker.source_opened.connect(self._na_zrodlo)
@@ -186,9 +205,7 @@ class MainWindow(QMainWindow):
         self._worker.error.connect(self._na_blad)
         self._worker.finished.connect(self._na_koniec)
 
-    # ------------------------------------------------------------------
-    # Akcje przycisków
-    # ------------------------------------------------------------------
+    # Akcje przycisków i przewijanie---------------------------
     def _otworz_plik(self):
         # Jeśli folderu data/ nie ma, dialog otworzy się w bieżącym folderze
         folder = str(DATA_DIR) if DATA_DIR.is_dir() else ""
@@ -200,6 +217,7 @@ class MainWindow(QMainWindow):
         self._akcja_start.setChecked(False)  # nowy film zaczyna się w pauzie
         # Blokujemy Start do potwierdzenia otwarcia. Gdyby plik się nie otworzył, nie odtworzymy pustego źródła.
         self._akcja_start.setEnabled(False)
+        self._suwak.ustaw_zakres(None, None)  # suwak nieaktywny do potwierdzenia otwarcia
         self._wyczysc_wyniki()
         self.sygnal_otworz.emit(sciezka)
         self.statusBar().showMessage(f"Otwieranie: {Path(sciezka).name}")
@@ -207,13 +225,30 @@ class MainWindow(QMainWindow):
     def _przelacz_start_stop(self, wlaczony):
         self._akcja_start.setText("Stop" if wlaczony else "Start")  # napis zgodny ze stanem
         if wlaczony:
-            if self._na_koncu:  # film się skończył, więc Start zaczyna od początku
+            if self._na_ostatniej_klatce():  # na końcu filmu Start zaczyna od początku
                 self._reset_workera()
             self.sygnal_start.emit()
             self.statusBar().showMessage("Odtwarzanie")
         else:
             self.sygnal_stop.emit()
             self.statusBar().showMessage("Pauza")
+
+    def _na_ostatniej_klatce(self):
+        """True, gdy odtwarzanie dobiegło końca albo stoimy na ostatniej klatce."""
+        if self._na_koncu:
+            return True
+        return self._liczba_klatek is not None and self._biezaca_klatka >= self._liczba_klatek - 1
+
+    def _przewin_do_klatki(self, numer):
+        # Ręczne przewinięcie kasuje znacznik „koniec”, więc Start gra od wybranego miejsca
+        self._na_koncu = False
+        self.sygnal_przewin.emit(numer)
+
+    def _na_klik_wykres(self, czas):
+        # Kliknięcie na wykresie: czas -> numer klatki -> przewinięcie. Bez filmu nie ma dokąd przewijać.
+        if not self._liczba_klatek or not self._fps:
+            return
+        self._przewin_do_klatki(czas_na_klatke(czas, self._fps, self._liczba_klatek))
 
     def _reset(self):
         self._akcja_start.setChecked(False)  # najpierw pauza
@@ -226,37 +261,62 @@ class MainWindow(QMainWindow):
         self.sygnal_reset.emit()
 
     def _wyczysc_wyniki(self):
-        self._bufor_czas.clear()
-        self._bufor_si.clear()
+        self._wyniki.clear()
+        self._wyniki_zmienione = False
+        self._biezaca_klatka = 0
         self._ostatni_czas = 0.0
-        self._ostatni_wynik = None
         self._timeline.set_data(np.array([]), np.array([]))
+        self._timeline.ustaw_kursor(0.0)
+        self._suwak.ustaw_klatke(0)
         self._panel.wyczysc()
         self._aktualizuj_etykiete()
 
-    # ------------------------------------------------------------------
-    # Sloty GUI: uruchamiane w wątku okna, gdy worker wyśle sygnał
-    # ------------------------------------------------------------------
+    # Sloty GUI: uruchamiane w wątku okna, gdy worker wyśle sygnał-----------
     def _na_zrodlo(self, info):
         # Worker potwierdził otwarcie pliku. Zapamiętujemy dane i ustawiamy oś X na długość filmu.
         self._nazwa_pliku = Path(info["path"]).name
         self._fps = info["fps"]
         self._dlugosc = info["duration"]
+        self._liczba_klatek = info["frame_count"]
         self._timeline.ustaw_zakres_czasu(self._dlugosc)
+        self._suwak.ustaw_zakres(self._liczba_klatek, self._fps)
         self._akcja_start.setEnabled(True)  # film jest, więc można odtwarzać
         self._akcja_start.setToolTip("")
         self._aktualizuj_etykiete()
 
     def _na_klatke(self, ramka, wynik):
         self._wideo.show_frame(ramka)
-        self._ostatni_wynik = wynik  # zapamiętujemy cały wynik dla panelu bocznego
+        numer = bezpieczny_odczyt(wynik, "frame_idx")
+        if numer is not None:
+            self._zapisz_wynik(numer, wynik)
+            self._biezaca_klatka = numer
         czas = bezpieczny_odczyt(wynik, "timestamp")
-        if czas is None:
-            return  # bez czasu nie ma gdzie wstawić punktu na wykresie
-        si_total = bezpieczny_odczyt(wynik, "si", "total")
-        self._bufor_czas.append(czas)
-        self._bufor_si.append(np.nan if si_total is None else si_total)  # NaN zostawia lukę w wykresie
-        self._ostatni_czas = czas
+        if czas is not None:
+            self._ostatni_czas = czas
+        # Panel boczny pokazuje kąty tej klatki od razu, także po przewinięciu w pauzie
+        self._panel.pokaz_wynik(wynik)
+        self._odswiez_pozycje()
+
+    def _zapisz_wynik(self, numer, wynik):
+        self._wyniki[numer] = wynik  # nadpisuje wpis, jeśli ta klatka już była
+        self._wyniki_zmienione = True
+        if len(self._wyniki) > MAX_PUNKTOW:
+            # Usuwamy najstarszy wpis (pierwszy w kolejności dodawania), żeby pamięć nie rosła bez końca
+            del self._wyniki[next(iter(self._wyniki))]
+
+    def _odswiez_pozycje(self):
+        # Kursor na wykresie, suwak i licznik czasu idą za bieżącą klatką
+        self._timeline.ustaw_kursor(self._ostatni_czas)
+        self._suwak.ustaw_klatke(self._biezaca_klatka)
+        self._aktualizuj_etykiete()
+
+    def _na_ustawienia(self, ustawienia):
+        # Jedno miejsce na zmianę ustawień: wykres, panel boczny i worker dostają to samo
+        progi = ustawienia["thresholds"]
+        self._timeline.set_thresholds(progi["warning"], progi["alarm"])
+        self._panel.ustaw_progi(progi["warning"], progi["alarm"])
+        self._panel.ustaw_stawy(ustawienia["joints"])
+        self.sygnal_ustawienia.emit(ustawienia)
 
     def _na_zdarzenie(self, zdarzenie):
         # Zdarzenia na razie pokazujemy tylko w pasku stanu.
@@ -272,9 +332,7 @@ class MainWindow(QMainWindow):
         self._akcja_start.setChecked(False)
         self.statusBar().showMessage("Koniec nagrania – Start odtworzy od początku")
 
-    # ------------------------------------------------------------------
-    # Odświeżanie wykresu: QTimer co 100 ms, a nie przy każdej klatce
-    # ------------------------------------------------------------------
+    # Odświeżanie wykresu: QTimer co 100 ms, a nie przy każdej klatce------------------
     def _utworz_odswiezanie(self):
         self._odswiezanie = QTimer(self)  # rodzicem jest okno, więc timer działa w wątku GUI
         self._odswiezanie.setInterval(100)  # 10 razy na sekundę
@@ -282,15 +340,30 @@ class MainWindow(QMainWindow):
         self._odswiezanie.start()
 
     def _odswiez_timeline(self):
-        if self._bufor_czas:
-            self._timeline.set_data(np.array(self._bufor_czas), np.array(self._bufor_si, dtype=float))
-        if self._ostatni_wynik is not None:
-            self._panel.pokaz_wynik(self._ostatni_wynik)  # ten sam timer odświeża też panel boczny
+        # Przerysowujemy wykres tylko wtedy, gdy doszły nowe wyniki (nie co 100 ms bez powodu)
+        if self._wyniki_zmienione:
+            self._wyniki_zmienione = False
+            czasy, si = self._dane_wykresu()
+            self._timeline.set_data(czasy, si)
         self._aktualizuj_etykiete()
 
-    # ------------------------------------------------------------------
-    # Zamykanie okna
-    # ------------------------------------------------------------------
+    def _dane_wykresu(self):
+        """Zamienia słownik wyników na dwie tablice (czas, SI) posortowane po czasie."""
+        pary = []
+        for wynik in self._wyniki.values():
+            czas = bezpieczny_odczyt(wynik, "timestamp")
+            if czas is None:
+                continue  # bez czasu nie ma gdzie wstawić punktu na wykresie
+            si = bezpieczny_odczyt(wynik, "si", "total")
+            pary.append((czas, np.nan if si is None else si))  # NaN zostawia lukę w wykresie
+        # Kolejność czasu, a nie kolejność dodania do słownika (po przewinięciu te dwie się różnią)
+        pary.sort(key=lambda para: para[0])
+        if not pary:
+            return np.array([]), np.array([])
+        czasy, si = zip(*pary)
+        return np.array(czasy, dtype=float), np.array(si, dtype=float)
+
+    # Zamykanie okna------------------------------------------------
     def closeEvent(self, event):
         # 1) zwalniamy plik wideo w wątku workera i czekamy, aż to zrobi
         QMetaObject.invokeMethod(self._worker, "zamknij", Qt.ConnectionType.BlockingQueuedConnection)

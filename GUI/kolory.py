@@ -11,9 +11,9 @@ POZIOM_BRAK = "brak"
 
 # (kolor tła, kolor tekstu)
 KOLORY = {
-    POZIOM_OK: ("#c8e6c9", "#1b5e20"),
-    POZIOM_UWAGA: ("#ffe082", "#6d4c00"),
-    POZIOM_ALARM: ("#ef9a9a", "#7f0000"),
+    POZIOM_OK: ("#a5f5a5", "#0b4d0b"),  # jasny zielony tło, ciemny tekst
+    POZIOM_UWAGA: ("#fff59d", "#4a3900"),  # jasny żółty
+    POZIOM_ALARM: ("#ff8a80", "#7a0000"),  # jasny czerwony
     POZIOM_BRAK: ("#e0e0e0", "#555555"),
 }
 

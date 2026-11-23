@@ -42,6 +42,7 @@ class MockWorker(QObject):
         self._klatka = 0  # numer bieżącej klatki
         self._ustawienia = {}  # ustawienia przekazane przez set_settings
         self._epizod = None  # dane trwającego epizodu asymetrii, jeśli taki jest
+        self._liczba_klatek = None  # ile klatek ma plik; None, gdy nieznane albo brak pliku
 
         # QTimer działa jak budzik: co 1/fps sekundy wywołuje _krok().
         # Rodzicem jest self, więc po moveToThread timer przenosi się razem z workerem.
@@ -73,6 +74,7 @@ class MockWorker(QObject):
         self._timer.setInterval(max(1, round(1000 / self._fps)))  # np. 30 fps daje 33 ms
         self._klatka = 0
         self._epizod = None
+        self._liczba_klatek = liczba_klatek if liczba_klatek > 0 else None
         # Długość filmu liczymy z liczby klatek i fps. Niektóre pliki nie podają liczby klatek (0 albo -1).
         dlugosc = liczba_klatek / self._fps if liczba_klatek > 0 else None
         self.source_opened.emit(
@@ -103,6 +105,32 @@ class MockWorker(QObject):
             self._klatka = 0
             self._epizod = None
 
+    @Slot(int)
+    def seek(self, numer_klatki):
+        """Przewija do klatki i wysyła jej wynik. Stan odtwarzania (gra/pauza) się nie zmienia.
+
+        Timer nie jest ruszany: jeśli film grał, gra dalej od nowej pozycji, a jeśli stał, dalej stoi.
+        """
+        if self._cap is None:
+            return  # bez pliku nie ma czego przewijać
+        if self._liczba_klatek is not None:
+            numer_klatki = min(max(numer_klatki, 0), self._liczba_klatek - 1)
+        try:
+            # Ustawiamy pozycję w pliku i odczytujemy jedną klatkę
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, numer_klatki)
+            ok, ramka = self._cap.read()
+            if not ok:
+                self.error.emit(f"Nie udało się odczytać klatki {numer_klatki}")
+                return
+            # Niektóre formaty przeskakują do najbliższej klatki kluczowej. Dlatego numer bierzemy
+            # z pliku (po odczycie pozycja wskazuje klatkę następną), a nie z żądania.
+            numer_faktyczny = int(self._cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+            self._klatka = numer_faktyczny + 1  # kolejna klatka, którą odczyta odtwarzanie
+            self._epizod = None  # epizod z poprzedniej pozycji nie ma sensu po skoku
+            self.frame_processed.emit(ramka, self._zbuduj_wynik(numer_faktyczny))
+        except Exception as blad:
+            self.error.emit(f"Przewijanie: {blad}")
+
     @Slot()
     def zamknij(self):
         """Wywoływane przed zamknięciem okna: zatrzymuje timer i zwalnia plik."""
@@ -113,8 +141,13 @@ class MockWorker(QObject):
 
     @Slot(dict)
     def set_settings(self, ustawienia):
-        # Tylko zapisujemy ustawienia. Atrapa jeszcze z nich nie korzysta.
+        # Zapamiętujemy ustawienia. Wybrane stawy wpływają na kąty i SI (jak w prawdziwym potoku).
+        # Progi i typ ćwiczenia na razie tylko zapamiętujemy.
         self._ustawienia = dict(ustawienia)
+
+    def _analizowane_stawy(self):
+        # Bez ustawień analizujemy wszystkie stawy z listy domyślnej
+        return self._ustawienia.get("joints", DEFAULT_JOINTS)
 
     # ------------------------------------------------------------------
     # Praca wewnętrzna, wywoływana przez timer co 1/fps sekundy
@@ -132,26 +165,31 @@ class MockWorker(QObject):
                     self.finished.emit()
                     return
 
-            t = self._klatka / self._fps  # czas liczymy z numeru klatki, nie z zegara ściennego
-            katy = self._katy_atrapy(t)
-            si = self._si_atrapy(katy)
-            landmarks = self._landmarks_atrapy(t)
-            self._sledz_epizod(t, si["total"])
-
-            wynik = {
-                "frame_idx": self._klatka,
-                "timestamp": round(t, 3),
-                "angles": katy,
-                "si": si,
-                "landmarks": landmarks,
-            }
+            wynik = self._zbuduj_wynik(self._klatka)
+            self._sledz_epizod(wynik["timestamp"], wynik["si"]["total"])
             self.frame_processed.emit(ramka, wynik)
             self._klatka += 1
         except Exception as blad:  # błąd nie może cicho zabić wątku, więc zgłaszamy go GUI
             self._timer.stop()
             self.error.emit(f"Atrapa potoku: {blad}")
 
-    def _katy_atrapy(self, t):
+    def _zbuduj_wynik(self, numer):
+        """Wynik jednej klatki. Zależy tylko od numeru klatki i fps, a nie od historii odtwarzania.
+
+        Dzięki temu po przewinięciu ta sama klatka zawsze ma te same wartości.
+        """
+        t = numer / self._fps  # czas liczymy z numeru klatki, nie z zegara ściennego
+        katy = self._katy_atrapy(t, numer)
+        si = self._si_atrapy(katy)
+        return {
+            "frame_idx": numer,
+            "timestamp": round(t, 3),
+            "angles": katy,
+            "si": si,
+            "landmarks": self._landmarks_atrapy(t, numer),
+        }
+
+    def _katy_atrapy(self, t, numer):
         """Kąty L/P dla każdego stawu: sinusoidy o różnych amplitudach."""
         # W czasie epizodu prawa strona dostaje dodatkowe osłabienie, czyli większą asymetrię
         cykl_t = t % OKRES_EPIZODU_S
@@ -161,10 +199,12 @@ class MockWorker(QObject):
             dodatek = 30.0 * math.sin(math.pi * (cykl_t - POCZATEK_EPIZODU_S) / dlugosc)
 
         katy = {}
+        analizowane = self._analizowane_stawy()
         for i, staw in enumerate(DEFAULT_JOINTS):
             faza = 2 * math.pi * 0.25 * t + i * 0.7  # każdy staw jest trochę przesunięty w czasie
-            # Co 300 klatek kolano na 15 klatek znika (kąt = None), żeby sprawdzić obsługę braku danych.
-            if (self._klatka % 300) in range(60, 75) and staw == "knee":
+            # Staw spoza wybranych nie jest liczony (None). Co 300 klatek kolano na 15 klatek znika,
+            # żeby sprawdzić obsługę braku danych.
+            if staw not in analizowane or ((numer % 300) in range(60, 75) and staw == "knee"):
                 katy[staw] = None
                 continue
             katy[staw] = {
@@ -190,9 +230,9 @@ class MockWorker(QObject):
         si["total"] = sum(dostepne) / len(dostepne) if dostepne else None
         return si
 
-    def _landmarks_atrapy(self, t):
+    def _landmarks_atrapy(self, t, numer):
         """33 punkty szkieletu krążące wokół środka kadru. None oznacza 'brak osoby'."""
-        if (self._klatka % 450) in range(400, 430):
+        if (numer % 450) in range(400, 430):
             return None  # przez chwilę nie ma osoby w kadrze
         punkty = []
         for k in range(LICZBA_LANDMARKS):
