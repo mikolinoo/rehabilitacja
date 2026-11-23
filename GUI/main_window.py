@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QSplitter, QTool
 
 from GUI.gui_data_format import bezpieczny_odczyt
 from GUI.mock_worker import MockWorker
+from GUI.side_panel import SidePanel
 from GUI.timeline_widget import TimelineWidget
 from GUI.video_widget import VideoWidget
 
@@ -43,6 +44,8 @@ class MainWindow(QMainWindow):
         self._bufor_si = deque(maxlen=MAX_PUNKTOW)
         self._ostatni_czas = 0.0
         self._na_koncu = False  # True, gdy film dobiegł końca
+        # Ostatni pełny wynik klatki. Panel boczny odświeża się z niego co 100 ms, a nie przy każdej klatce.
+        self._ostatni_wynik = None
 
         # Informacje o otwartym pliku. Ustawiamy je, gdy worker potwierdzi otwarcie.
         self._nazwa_pliku = None
@@ -74,6 +77,9 @@ class MainWindow(QMainWindow):
         self._akcja_start = QAction("Start", self)
         self._akcja_start.setCheckable(True)
         self._akcja_start.toggled.connect(self._przelacz_start_stop)
+        # Dopóki nie ma załadowanego filmu, nie ma czego odtwarzać. Odblokowuje go _na_zrodlo.
+        self._akcja_start.setEnabled(False)
+        self._akcja_start.setToolTip("Najpierw otwórz plik wideo")
         pasek.addAction(self._akcja_start)
 
         # Reset wraca na pierwszą klatkę i czyści wyniki
@@ -120,7 +126,9 @@ class MainWindow(QMainWindow):
         return self._wideo
 
     def _utworz_panel_katow(self):
-        return self._zaslepka("KĄTY / OSTRZEŻENIA", "#d8f5d0")
+        # Panel z kątami, SI i ostrzeżeniami. Zapamiętujemy go w self, żeby odświeżać go z timera.
+        self._panel = SidePanel()
+        return self._panel
 
     def _utworz_panel_ustawien(self):
         return self._zaslepka("USTAWIENIA", "#fff3c4")
@@ -190,6 +198,8 @@ class MainWindow(QMainWindow):
         if not sciezka:  # użytkownik kliknął Anuluj
             return
         self._akcja_start.setChecked(False)  # nowy film zaczyna się w pauzie
+        # Blokujemy Start do potwierdzenia otwarcia. Gdyby plik się nie otworzył, nie odtworzymy pustego źródła.
+        self._akcja_start.setEnabled(False)
         self._wyczysc_wyniki()
         self.sygnal_otworz.emit(sciezka)
         self.statusBar().showMessage(f"Otwieranie: {Path(sciezka).name}")
@@ -219,7 +229,9 @@ class MainWindow(QMainWindow):
         self._bufor_czas.clear()
         self._bufor_si.clear()
         self._ostatni_czas = 0.0
+        self._ostatni_wynik = None
         self._timeline.set_data(np.array([]), np.array([]))
+        self._panel.wyczysc()
         self._aktualizuj_etykiete()
 
     # ------------------------------------------------------------------
@@ -231,10 +243,13 @@ class MainWindow(QMainWindow):
         self._fps = info["fps"]
         self._dlugosc = info["duration"]
         self._timeline.ustaw_zakres_czasu(self._dlugosc)
+        self._akcja_start.setEnabled(True)  # film jest, więc można odtwarzać
+        self._akcja_start.setToolTip("")
         self._aktualizuj_etykiete()
 
     def _na_klatke(self, ramka, wynik):
         self._wideo.show_frame(ramka)
+        self._ostatni_wynik = wynik  # zapamiętujemy cały wynik dla panelu bocznego
         czas = bezpieczny_odczyt(wynik, "timestamp")
         if czas is None:
             return  # bez czasu nie ma gdzie wstawić punktu na wykresie
@@ -269,6 +284,8 @@ class MainWindow(QMainWindow):
     def _odswiez_timeline(self):
         if self._bufor_czas:
             self._timeline.set_data(np.array(self._bufor_czas), np.array(self._bufor_si, dtype=float))
+        if self._ostatni_wynik is not None:
+            self._panel.pokaz_wynik(self._ostatni_wynik)  # ten sam timer odświeża też panel boczny
         self._aktualizuj_etykiete()
 
     # ------------------------------------------------------------------
