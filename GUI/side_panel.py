@@ -1,10 +1,13 @@
-from PySide6.QtCore import Qt
+from bisect import bisect_right
+
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -12,7 +15,15 @@ from PySide6.QtWidgets import (
 )
 
 from GUI.gui_data_format import DEFAULT_JOINTS, bezpieczny_odczyt
-from GUI.kolory import PROG_ALARMU_DOMYSLNY, PROG_OSTRZEZENIA_DOMYSLNY, ocena_si
+from GUI.kolory import (
+    KOLORY,
+    POZIOM_ALARM,
+    POZIOM_BRAK,
+    PROG_ALARMU_DOMYSLNY,
+    PROG_OSTRZEZENIA_DOMYSLNY,
+    TEKST_STATUSU,
+    ocena_si,
+)
 
 # Polskie nazwy stawów do tabeli. Klucze muszą być takie jak w DEFAULT_JOINTS.
 NAZWY_STAWOW = {"shoulder": "bark", "elbow": "łokieć", "hip": "biodro", "knee": "kolano"}
@@ -33,12 +44,23 @@ def formatuj(wartosc, miejsca):
     return f"{wartosc:.{miejsca}f}"
 
 
+def formatuj_czas_ostrzezenia(sekundy):
+    """Czas w formacie mm:ss.s do listy ostrzeżeń. None zamienia na „—”."""
+    if sekundy is None:
+        return BRAK
+    minuty, reszta = divmod(sekundy, 60)
+    return f"{int(minuty):02d}:{reszta:04.1f}"
+
+
 class SidePanel(QWidget):
     """Panel boczny: symetria ogólna, tabela kątów i SI oraz lista ostrzeżeń.
 
-    Panel tylko pokazuje gotowe dane z wyniku klatki (angles i si). Nic nie liczy.
-    Odświeża go MainWindow przy każdej klatce z workera.
+    Panel pokazuje gotowe dane z wyniku klatki (angles i si) oraz listę zdarzeń.
+    Nic nie liczy. Odświeża go MainWindow przy każdej klatce z workera.
     """
+
+    # Sygnał po kliknięciu wpisu na liście: słownik zdarzenia (format z gui_data_format)
+    wybrano_zdarzenie = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -66,12 +88,17 @@ class SidePanel(QWidget):
             self._tabela.setItem(wiersz, 0, QTableWidgetItem(NAZWY_STAWOW.get(staw, staw)))
             self._ustaw_nazwe(wiersz, staw)
 
-        self._lista_ostrzezen = QListWidget()  # na razie pusta, wypełni ją zadanie 8
+        # Lista zdarzeń posortowana po czasie startu. Trzymamy ją też jako zwykłą listę Pythona,
+        # żeby wiedzieć, która pozycja odpowiada któremu wpisowi po kliknięciu.
+        self._zdarzenia = []
+        self._lista_ostrzezen = QListWidget()
+        self._lista_ostrzezen.itemClicked.connect(self._klikniecie_wpisu)
+        self._etykieta_ostrzezen = QLabel()  # licznik, tekst ustawia _odswiez_licznik
 
         uklad = QVBoxLayout(self)  # układ pionowy: elementy jeden pod drugim
         uklad.addWidget(self._etykieta_total)
         uklad.addWidget(self._tabela)
-        uklad.addWidget(QLabel("Ostrzeżenia"))
+        uklad.addWidget(self._etykieta_ostrzezen)
         uklad.addWidget(self._lista_ostrzezen, 1)  # lista dostaje resztę wysokości panelu
 
         self.wyczysc()
@@ -124,11 +151,50 @@ class SidePanel(QWidget):
     def wyczysc(self):
         """Wszystko na „—” i pusta lista ostrzeżeń. Używamy przy Reset i przy otwarciu nowego pliku."""
         self.pokaz_wynik(None)
+        self.wyczysc_zdarzenia()
+
+    def dodaj_zdarzenie(self, zdarzenie):
+        """Dodaje wpis na listę we właściwym miejscu, według czasu startu.
+
+        Wstawiamy jeden wpis zamiast przebudowywać całą listę, więc reszta się nie przeładowuje.
+        """
+        starty = [z.get("start") or 0.0 for z in self._zdarzenia]
+        pozycja = bisect_right(starty, zdarzenie.get("start") or 0.0)
+        self._zdarzenia.insert(pozycja, zdarzenie)
+        self._lista_ostrzezen.insertItem(pozycja, self._tworz_wpis(zdarzenie))
+        self._odswiez_licznik()
+
+    def wyczysc_zdarzenia(self):
+        """Pusta lista ostrzeżeń i licznik na zero."""
+        self._zdarzenia = []
         self._lista_ostrzezen.clear()
+        self._odswiez_licznik()
 
     # ------------------------------------------------------------------
     # Pomocnicze
     # ------------------------------------------------------------------
+    def _tworz_wpis(self, zdarzenie):
+        """Tekst wpisu, np. „00:03.0–00:05.2  łokieć  Uwaga (max 14.5 %)” w kolorze poziomu."""
+        poziom = zdarzenie.get("level")
+        tlo, tekst_kolor = KOLORY.get(poziom, KOLORY[POZIOM_BRAK])
+        tekst = (
+            f"{formatuj_czas_ostrzezenia(zdarzenie.get('start'))}–{formatuj_czas_ostrzezenia(zdarzenie.get('end'))}"
+            f"  {NAZWY_STAWOW.get(zdarzenie.get('joint'), zdarzenie.get('joint'))}"
+            f"  {TEKST_STATUSU.get(poziom, BRAK)} (max {formatuj(zdarzenie.get('si_max'), 1)} %)"
+        )
+        wpis = QListWidgetItem(tekst)
+        wpis.setBackground(QColor(tlo))
+        wpis.setForeground(QColor(tekst_kolor))
+        return wpis
+
+    def _odswiez_licznik(self):
+        alarmy = sum(1 for z in self._zdarzenia if z.get("level") == POZIOM_ALARM)
+        self._etykieta_ostrzezen.setText(f"Ostrzeżenia: {len(self._zdarzenia)} (alarmy: {alarmy})")
+
+    def _klikniecie_wpisu(self, wpis):
+        # Pozycja wpisu na liście = pozycja w _zdarzenia (oba są posortowane tak samo)
+        self.wybrano_zdarzenie.emit(self._zdarzenia[self._lista_ostrzezen.row(wpis)])
+
     def _ustaw_nazwe(self, wiersz, staw):
         """Kolumna „Staw”: ciemne tło, a napis biały (analizowany) albo jasnoszary (nieanalizowany)."""
         nazwa = self._tabela.item(wiersz, 0)

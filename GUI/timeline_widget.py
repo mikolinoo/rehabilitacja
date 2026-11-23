@@ -1,6 +1,7 @@
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 
 from GUI.kolory import (
     PROG_ALARMU_DOMYSLNY,
@@ -9,6 +10,8 @@ from GUI.kolory import (
     POZIOM_OK,
     POZIOM_UWAGA,
 )
+from GUI.gui_data_format import DEFAULT_JOINTS
+from GUI.side_panel import NAZWY_STAWOW
 
 # Kolory krzywej SI i linii progów wg poziomu. Są jaskrawe, żeby były widoczne na białym tle.
 KOLOR_WYKRESU = {
@@ -16,6 +19,22 @@ KOLOR_WYKRESU = {
     POZIOM_UWAGA: "#ffc400",  # żółty: SI od uwagi do alarmu
     POZIOM_ALARM: "#ff1744",  # mocny czerwony: SI od alarmu
 }
+
+# Przezroczystość (0–255) pasa zdarzenia: zwykły i wyróżniony (po kliknięciu na liście)
+PRZEZROCZYSTOSC_PASA = 60
+PRZEZROCZYSTOSC_WYROZNIONEGO = 150
+
+
+def _pedzel(kolor, przezroczystosc):
+    """Pędzel (brush) do wypełnienia pasa: kolor z przezroczystością."""
+    barwa = QColor(kolor)
+    barwa.setAlpha(przezroczystosc)
+    return pg.mkBrush(barwa)
+
+
+def _klucz_zdarzenia(zdarzenie):
+    """Pozwala rozpoznać to samo zdarzenie: staw i czas startu."""
+    return zdarzenie.get("joint"), zdarzenie.get("start")
 
 
 class TimelineWidget(pg.PlotWidget):
@@ -64,8 +83,13 @@ class TimelineWidget(pg.PlotWidget):
         self._progi = (PROG_OSTRZEZENIA_DOMYSLNY, PROG_ALARMU_DOMYSLNY)  # (uwaga, alarm) w procentach
         self._ostatnie_dane = (np.array([]), np.array([]))  # pamiętamy, żeby przerysować po zmianie progów
 
+        # Pasy zdarzeń: lista wpisów {"zdarzenie", "kolor", "pas", "podpis"}
+        self._pasy = []
+
         # Kliknięcia na całej scenie (wykres i osie). Odfiltrowujemy je w _klikniecie.
         self.scene().sigMouseClicked.connect(self._klikniecie)
+        # Podpisy zdarzeń mają stać u góry wykresu, więc przesuwamy je, gdy zmienia się zakres Y
+        self.plotItem.vb.sigYRangeChanged.connect(lambda *_: self._przesun_podpisy())
 
     # ------------------------------------------------------------------
     # Metody publiczne, wywoływane przez MainWindow
@@ -113,9 +137,67 @@ class TimelineWidget(pg.PlotWidget):
         self._progi = (warning, alarm)
         self._rysuj()  # kolor krzywej zależy od progów, więc przerysowujemy od razu, także w pauzie
 
+    def ustaw_opis_stawow(self, stawy):
+        """Tytuł wykresu mówi, z jakich stawów liczona jest krzywa SI (wybór w panelu ustawień)."""
+        if not stawy:
+            opis = "brak wybranych stawów"
+        elif len(stawy) == len(DEFAULT_JOINTS):
+            opis = "średnia ze wszystkich stawów"
+        elif len(stawy) == 1:
+            opis = f"tylko: {NAZWY_STAWOW.get(stawy[0], stawy[0])}"
+        else:
+            opis = "średnia z: " + ", ".join(NAZWY_STAWOW.get(s, s) for s in stawy)
+        self.setTitle(f"Krzywa SI – {opis}")
+
+    def dodaj_zdarzenie(self, zdarzenie):
+        """Rysuje pas od początku do końca zdarzenia z podpisem stawu.
+
+        Pas to LinearRegionItem: pionowy prostokąt między dwiema wartościami osi X.
+        Użytkownik go nie przesuwa (movable=False), a jego kolor zależy od poziomu zdarzenia.
+        """
+        kolor = KOLOR_WYKRESU.get(zdarzenie.get("level"), KOLOR_WYKRESU[POZIOM_UWAGA])
+        pas = pg.LinearRegionItem(
+            values=(zdarzenie["start"], zdarzenie["end"]),
+            brush=_pedzel(kolor, PRZEZROCZYSTOSC_PASA),
+            hoverBrush=_pedzel(kolor, PRZEZROCZYSTOSC_PASA),  # bez zmiany koloru po najechaniu myszą
+            pen=pg.mkPen(color=kolor, width=1),
+            movable=False,
+        )
+        pas.setZValue(-5)  # pas idzie pod krzywą SI, żeby jej nie zasłaniał
+
+        podpis = pg.TextItem(NAZWY_STAWOW.get(zdarzenie["joint"], zdarzenie["joint"]), color=kolor, anchor=(0, 0))
+        # ignoreBounds=True: pas i podpis nie biorą udziału w dopasowaniu zakresu osi Y.
+        # Bez tego podpis ustawiony na górze widoku podnosi zakres, a zakres podnosi podpis (pętla),
+        # i krzywa SI spłaszcza się do zera.
+        self.addItem(pas, ignoreBounds=True)
+        self.addItem(podpis, ignoreBounds=True)
+        self._pasy.append({"zdarzenie": zdarzenie, "kolor": kolor, "pas": pas, "podpis": podpis})
+        self._przesun_podpisy()
+
+    def wyroznij_zdarzenie(self, zdarzenie):
+        """Pogrubia pas wybranego zdarzenia (po kliknięciu na liście). None zdejmuje wyróżnienie."""
+        klucz = _klucz_zdarzenia(zdarzenie) if zdarzenie is not None else None
+        for wpis in self._pasy:
+            wyrozniony = klucz is not None and _klucz_zdarzenia(wpis["zdarzenie"]) == klucz
+            przezroczystosc = PRZEZROCZYSTOSC_WYROZNIONEGO if wyrozniony else PRZEZROCZYSTOSC_PASA
+            wpis["pas"].setBrush(_pedzel(wpis["kolor"], przezroczystosc))
+
+    def wyczysc_zdarzenia(self):
+        """Usuwa wszystkie pasy i podpisy z wykresu."""
+        for wpis in self._pasy:
+            self.removeItem(wpis["pas"])
+            self.removeItem(wpis["podpis"])
+        self._pasy = []
+
     # ------------------------------------------------------------------
     # Pomocnicze
     # ------------------------------------------------------------------
+    def _przesun_podpisy(self):
+        # Podpisy zdarzeń trzymamy u góry widocznego obszaru (wartość Y zmienia się z zakresem)
+        gora = self.plotItem.vb.viewRange()[1][1]
+        for wpis in self._pasy:
+            wpis["podpis"].setPos(wpis["zdarzenie"]["start"], gora)
+
     def _utworz_linie_progu(self, podpis, kolor):
         # Przerywana pozioma linia z podpisem po lewej stronie wykresu
         linia = pg.InfiniteLine(

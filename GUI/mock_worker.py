@@ -14,7 +14,10 @@ AMPLITUDA_L = 40.0  # lewa strona rusza się bardziej
 AMPLITUDA_R = 25.0  # prawa strona ma mniejszą amplitudę, czyli udaje asymetrię
 OKRES_EPIZODU_S = 8.0  # co ile sekund powtarza się epizod z większą asymetrią
 POCZATEK_EPIZODU_S = 5.0  # w którym momencie cyklu epizod się zaczyna
-PROG_ALARMU_ATRAPY = 20.0  # używany tylko do wyboru poziomu zdarzenia w atrapie
+# Progi atrapy wykrywania zdarzeń. Używamy ich, dopóki GUI nie przyśle własnych ustawień.
+PROG_OSTRZEZENIA_ATRAPY = 10.0
+PROG_ALARMU_ATRAPY = 20.0
+MIN_CZAS_ZDARZENIA_S = 0.3  # krótsze „zdarzenia” to szum, więc ich nie zgłaszamy
 
 
 class MockWorker(QObject):
@@ -41,7 +44,10 @@ class MockWorker(QObject):
         self._fps = FPS_DOMYSLNY
         self._klatka = 0  # numer bieżącej klatki
         self._ustawienia = {}  # ustawienia przekazane przez set_settings
-        self._epizod = None  # dane trwającego epizodu asymetrii, jeśli taki jest
+        # Wykrywanie zdarzeń: zdarzenia w toku dla każdego stawu, czyli {staw: {"start", "si_max"}}
+        self._otwarte = {}
+        # Stawy, których zdarzenie zaczęło się przed przewinięciem. Nie znamy jego początku, więc je pomijamy
+        self._pominiete = set()
         self._liczba_klatek = None  # ile klatek ma plik; None, gdy nieznane albo brak pliku
 
         # QTimer działa jak budzik: co 1/fps sekundy wywołuje _krok().
@@ -73,7 +79,7 @@ class MockWorker(QObject):
         liczba_klatek = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self._timer.setInterval(max(1, round(1000 / self._fps)))  # np. 30 fps daje 33 ms
         self._klatka = 0
-        self._epizod = None
+        self._zacznij_sledzenie(0)
         self._liczba_klatek = liczba_klatek if liczba_klatek > 0 else None
         # Długość filmu liczymy z liczby klatek i fps. Niektóre pliki nie podają liczby klatek (0 albo -1).
         dlugosc = liczba_klatek / self._fps if liczba_klatek > 0 else None
@@ -103,7 +109,7 @@ class MockWorker(QObject):
             self.open_source(self._sciezka)
         else:
             self._klatka = 0
-            self._epizod = None
+            self._zacznij_sledzenie(0)
 
     @Slot(int)
     def seek(self, numer_klatki):
@@ -126,7 +132,7 @@ class MockWorker(QObject):
             # z pliku (po odczycie pozycja wskazuje klatkę następną), a nie z żądania.
             numer_faktyczny = int(self._cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
             self._klatka = numer_faktyczny + 1  # kolejna klatka, którą odczyta odtwarzanie
-            self._epizod = None  # epizod z poprzedniej pozycji nie ma sensu po skoku
+            self._zacznij_sledzenie(numer_faktyczny)  # po skoku zaczynamy wykrywanie od nowa
             self.frame_processed.emit(ramka, self._zbuduj_wynik(numer_faktyczny))
         except Exception as blad:
             self.error.emit(f"Przewijanie: {blad}")
@@ -142,8 +148,10 @@ class MockWorker(QObject):
     @Slot(dict)
     def set_settings(self, ustawienia):
         # Zapamiętujemy ustawienia. Wybrane stawy wpływają na kąty i SI (jak w prawdziwym potoku).
-        # Progi i typ ćwiczenia na razie tylko zapamiętujemy.
+        # Progi wpływają na wykrywanie zdarzeń. Typ ćwiczenia na razie tylko zapamiętujemy.
         self._ustawienia = dict(ustawienia)
+        # Nowe progi albo stawy = wykrywanie od czystego stanu, od bieżącej klatki
+        self._zacznij_sledzenie(max(self._klatka - 1, 0))
 
     def _analizowane_stawy(self):
         # Bez ustawień analizujemy wszystkie stawy z listy domyślnej
@@ -162,11 +170,13 @@ class MockWorker(QObject):
                 ok, ramka = self._cap.read()
                 if not ok:
                     self._timer.stop()  # zatrzymujemy się na ostatniej klatce
+                    # Film się skończył, więc zdarzenia w toku kończą się tutaj (przed „finished”)
+                    self._zamknij_wszystkie(self._klatka / self._fps)
                     self.finished.emit()
                     return
 
             wynik = self._zbuduj_wynik(self._klatka)
-            self._sledz_epizod(wynik["timestamp"], wynik["si"]["total"])
+            self._sledz_zdarzenia(wynik["timestamp"], wynik["si"])
             self.frame_processed.emit(ramka, wynik)
             self._klatka += 1
         except Exception as blad:  # błąd nie może cicho zabić wątku, więc zgłaszamy go GUI
@@ -242,23 +252,70 @@ class MockWorker(QObject):
             punkty.append((x, y, 0.95))  # 0.95 to pewność, że punkt jest widoczny
         return punkty
 
-    def _sledz_epizod(self, t, si_total):
-        """Pamięta epizod asymetrii i po jego zakończeniu wysyła zdarzenie."""
-        w_epizodzie = (t % OKRES_EPIZODU_S) >= POCZATEK_EPIZODU_S
-        if w_epizodzie:
-            if self._epizod is None:
-                self._epizod = {"start": round(t, 3), "si_max": 0.0}
-            if si_total is not None:
-                self._epizod["si_max"] = max(self._epizod["si_max"], si_total)
-        elif self._epizod is not None:
-            # Epizod właśnie się skończył, więc wysyłamy zdarzenie w formacie z gui_data_format
-            si_max = self._epizod["si_max"]
-            zdarzenie = {
-                "start": self._epizod["start"],
-                "end": round(t, 3),
-                "joint": "elbow",  # atrapa zawsze pokazuje łokieć
-                "level": "alarm" if si_max >= PROG_ALARMU_ATRAPY else "warning",
-                "si_max": round(si_max, 1),
+    def _progi(self):
+        """Progi (uwaga, alarm) z ustawień GUI, a gdy ich brak – wartości domyślne atrapy."""
+        progi = self._ustawienia.get("thresholds") or {}
+        return progi.get("warning", PROG_OSTRZEZENIA_ATRAPY), progi.get("alarm", PROG_ALARMU_ATRAPY)
+
+    def _zacznij_sledzenie(self, numer):
+        """Czyści stan wykrywania i zapamiętuje, które stawy są już w zdarzeniu na tej klatce.
+
+        Jeśli przewijamy do środka zdarzenia, nie znamy jego prawdziwego początku. Gdybyśmy
+        zaczęli liczyć od tego miejsca, zgłosilibyśmy zdarzenie z błędnym czasem startu. Dlatego
+        takie zdarzenie pomijamy. Pojawi się, gdy odtworzymy film od jego początku.
+        """
+        self._otwarte = {}
+        self._pominiete = set()
+        if numer <= 0:
+            return  # od początku filmu każde zdarzenie ma znany początek
+        wynik = self._zbuduj_wynik(numer)
+        warning, _ = self._progi()
+        for staw in self._analizowane_stawy():
+            si = wynik["si"].get(staw)
+            if si is not None and si >= warning:
+                self._pominiete.add(staw)
+
+    def _sledz_zdarzenia(self, t, si):
+        """Wykrywa zdarzenia w jednej klatce odtwarzania. t – czas klatki, si – słownik SI stawów.
+
+        Zdarzenie zaczyna się, gdy SI stawu wejdzie na poziom uwagi (≥ próg uwagi), a kończy,
+        gdy spadnie poniżej. Działa osobno dla każdego stawu.
+        """
+        warning, _ = self._progi()
+        for staw in self._analizowane_stawy():
+            wartosc = si.get(staw)
+            if wartosc is None:
+                continue  # brak stawu w tej klatce, więc stan zostaje bez zmian
+            if staw in self._pominiete:
+                if wartosc < warning:
+                    self._pominiete.discard(staw)  # to zdarzenie się skończyło, od następnego liczymy
+                continue
+            if staw in self._otwarte:
+                zdarzenie = self._otwarte[staw]
+                zdarzenie["si_max"] = max(zdarzenie["si_max"], wartosc)
+                if wartosc < warning:
+                    del self._otwarte[staw]
+                    self._zamknij(staw, zdarzenie, t)
+            elif wartosc >= warning:
+                self._otwarte[staw] = {"start": t, "si_max": wartosc}
+
+    def _zamknij(self, staw, zdarzenie, koniec):
+        """Wysyła zdarzenie, jeśli trwało dość długo. Poziom zależy od najwyższego SI w zdarzeniu."""
+        if koniec - zdarzenie["start"] < MIN_CZAS_ZDARZENIA_S:
+            return  # za krótkie, pomijamy
+        _, alarm = self._progi()
+        self.event_detected.emit(
+            {
+                "start": round(zdarzenie["start"], 3),
+                "end": round(koniec, 3),
+                "joint": staw,
+                "level": "alarm" if zdarzenie["si_max"] >= alarm else "warning",
+                "si_max": round(zdarzenie["si_max"], 1),
             }
-            self._epizod = None
-            self.event_detected.emit(zdarzenie)
+        )
+
+    def _zamknij_wszystkie(self, koniec):
+        """Kończy zdarzenia, które były w toku, gdy film się skończył."""
+        for staw, zdarzenie in list(self._otwarte.items()):
+            self._zamknij(staw, zdarzenie, koniec)
+        self._otwarte = {}

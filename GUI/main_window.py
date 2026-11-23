@@ -54,6 +54,10 @@ class MainWindow(QMainWindow):
         # nadpisuje jej wpis zamiast dodawać duplikat. Słownik pamięta kolejność dodawania,
         # więc pierwszy wpis to najstarszy (tego używamy przy usuwaniu nadmiaru).
         self._wyniki = {}
+        # Zdarzenia asymetrii w jednym miejscu: {(staw, czas startu): zdarzenie}. Klucz zapobiega duplikatom,
+        # bo po przewinięciu do tyłu i ponownym odtworzeniu worker wysyła to samo zdarzenie jeszcze raz.
+        self._zdarzenia = {}
+        self._ostatnie_stawy = None  # stawy, z których liczona była krzywa w buforze
         self._wyniki_zmienione = False  # czy wykres trzeba przerysować przy najbliższym odświeżeniu
         self._biezaca_klatka = 0  # numer klatki, którą właśnie pokazujemy
         self._ostatni_czas = 0.0
@@ -144,6 +148,7 @@ class MainWindow(QMainWindow):
     def _utworz_panel_katow(self):
         # Panel z kątami, SI i ostrzeżeniami. Odświeżamy go przy każdej klatce.
         self._panel = SidePanel()
+        self._panel.wybrano_zdarzenie.connect(self._na_klik_ostrzezenie)
         return self._panel
 
     def _utworz_panel_ustawien(self):
@@ -244,6 +249,14 @@ class MainWindow(QMainWindow):
         self._na_koncu = False
         self.sygnal_przewin.emit(numer)
 
+    def _na_klik_ostrzezenie(self, zdarzenie):
+        # Kliknięcie wpisu na liście: wyróżniamy pas na wykresie i przewijamy film do początku zdarzenia
+        self._timeline.wyroznij_zdarzenie(zdarzenie)
+        start = bezpieczny_odczyt(zdarzenie, "start")
+        if start is None or not self._liczba_klatek or not self._fps:
+            return
+        self._przewin_do_klatki(czas_na_klatke(start, self._fps, self._liczba_klatek))
+
     def _na_klik_wykres(self, czas):
         # Kliknięcie na wykresie: czas -> numer klatki -> przewinięcie. Bez filmu nie ma dokąd przewijać.
         if not self._liczba_klatek or not self._fps:
@@ -268,8 +281,15 @@ class MainWindow(QMainWindow):
         self._timeline.set_data(np.array([]), np.array([]))
         self._timeline.ustaw_kursor(0.0)
         self._suwak.ustaw_klatke(0)
+        self._wyczysc_zdarzenia()
         self._panel.wyczysc()
         self._aktualizuj_etykiete()
+
+    def _wyczysc_zdarzenia(self):
+        # Zdarzenia znikają z bufora, wykresu i listy naraz (Reset, nowy plik, zmiana ustawień)
+        self._zdarzenia.clear()
+        self._timeline.wyczysc_zdarzenia()
+        self._panel.wyczysc_zdarzenia()
 
     # Sloty GUI: uruchamiane w wątku okna, gdy worker wyśle sygnał-----------
     def _na_zrodlo(self, info):
@@ -311,16 +331,36 @@ class MainWindow(QMainWindow):
         self._aktualizuj_etykiete()
 
     def _na_ustawienia(self, ustawienia):
-        # Jedno miejsce na zmianę ustawień: wykres, panel boczny i worker dostają to samo
+        # Jedno miejsce na zmianę ustawień: wykres, panel boczny i worker dostają to samo.
+        # Zdarzenia z poprzednich progów przestają być prawdziwe, więc je kasujemy.
+        self._wyczysc_zdarzenia()
         progi = ustawienia["thresholds"]
         self._timeline.set_thresholds(progi["warning"], progi["alarm"])
         self._panel.ustaw_progi(progi["warning"], progi["alarm"])
-        self._panel.ustaw_stawy(ustawienia["joints"])
+        stawy = list(ustawienia["joints"])
+        self._timeline.ustaw_opis_stawow(stawy)
+        # Krzywa SI to średnia z wybranych stawów, więc zmiana wyboru unieważnia bufor.
+        # Zmiana samych progów tego nie robi (zmieniają tylko kolory).
+        if stawy != self._ostatnie_stawy:
+            self._ostatnie_stawy = stawy
+            self._wyniki.clear()
+            self._wyniki_zmienione = True  # wykres zostanie przerysowany w najbliższym odświeżeniu
+        self._panel.ustaw_stawy(stawy)
         self.sygnal_ustawienia.emit(ustawienia)
 
     def _na_zdarzenie(self, zdarzenie):
-        # Zdarzenia na razie pokazujemy tylko w pasku stanu.
-        self.statusBar().showMessage(f"Zdarzenie: {zdarzenie.get('joint')} ({zdarzenie.get('level')})")
+        staw = bezpieczny_odczyt(zdarzenie, "joint")
+        start = bezpieczny_odczyt(zdarzenie, "start")
+        if start is None:
+            return  # bez czasu startu nie ma gdzie narysować pasa
+        # Zaokrąglamy start, żeby ten sam czas z kolejnych przebiegów dał ten sam klucz
+        klucz = (staw, round(start, 3))
+        if klucz in self._zdarzenia:
+            return  # to samo zdarzenie już mamy, np. po przewinięciu do tyłu i ponownym odtworzeniu
+        self._zdarzenia[klucz] = zdarzenie
+        self._timeline.dodaj_zdarzenie(zdarzenie)
+        self._panel.dodaj_zdarzenie(zdarzenie)
+        self.statusBar().showMessage(f"Zdarzenie: {staw} ({bezpieczny_odczyt(zdarzenie, 'level')})")
 
     def _na_blad(self, tekst):
         self._akcja_start.setChecked(False)  # zatrzymujemy odtwarzanie; ustawia to też komunikat „Pauza”
@@ -348,20 +388,30 @@ class MainWindow(QMainWindow):
         self._aktualizuj_etykiete()
 
     def _dane_wykresu(self):
-        """Zamienia słownik wyników na dwie tablice (czas, SI) posortowane po czasie."""
-        pary = []
-        for wynik in self._wyniki.values():
+        """Zamienia słownik wyników na dwie tablice (czas, SI) w kolejności numerów klatek.
+
+        Gdy między dwoma kolejnymi wynikami brakuje klatek (np. po przewinięciu do przodu),
+        wstawiamy pusty punkt (NaN). Wykres wtedy urywa linię zamiast łączyć dwa odległe
+        miejsca prostą. Dane w buforze nie są kasowane, więc po powrocie linia się uzupełnia.
+        """
+        czasy = []
+        si_wartosci = []
+        poprzedni_numer = None
+        # Sortujemy po numerze klatki, a nie po kolejności dodania do słownika (po przewinięciu się różnią)
+        for numer in sorted(self._wyniki):
+            wynik = self._wyniki[numer]
             czas = bezpieczny_odczyt(wynik, "timestamp")
             if czas is None:
                 continue  # bez czasu nie ma gdzie wstawić punktu na wykresie
+            if poprzedni_numer is not None and numer - poprzedni_numer > 1:
+                # Brakuje klatek między poprzednim a tym punktem: przerwa w linii
+                czasy.append(czas)
+                si_wartosci.append(np.nan)
             si = bezpieczny_odczyt(wynik, "si", "total")
-            pary.append((czas, np.nan if si is None else si))  # NaN zostawia lukę w wykresie
-        # Kolejność czasu, a nie kolejność dodania do słownika (po przewinięciu te dwie się różnią)
-        pary.sort(key=lambda para: para[0])
-        if not pary:
-            return np.array([]), np.array([])
-        czasy, si = zip(*pary)
-        return np.array(czasy, dtype=float), np.array(si, dtype=float)
+            czasy.append(czas)
+            si_wartosci.append(np.nan if si is None else si)  # NaN też zostawia lukę w wykresie
+            poprzedni_numer = numer
+        return np.array(czasy, dtype=float), np.array(si_wartosci, dtype=float)
 
     # Zamykanie okna------------------------------------------------
     def closeEvent(self, event):
