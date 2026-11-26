@@ -18,6 +18,9 @@ POCZATEK_EPIZODU_S = 5.0  # w którym momencie cyklu epizod się zaczyna
 PROG_OSTRZEZENIA_ATRAPY = 10.0
 PROG_ALARMU_ATRAPY = 20.0
 MIN_CZAS_ZDARZENIA_S = 0.3  # krótsze „zdarzenia” to szum, więc ich nie zgłaszamy
+# True: po wczytaniu pliku (i po zmianie ustawień) cały film liczymy od razu i wykres rysuje się w całości.
+# False: wykres rośnie na żywo podczas odtwarzania, jak wcześniej. Przełącznik do szybkiego powrotu.
+CALY_FILM_OD_RAZU = True
 
 
 class MockWorker(QObject):
@@ -34,6 +37,7 @@ class MockWorker(QObject):
     source_opened = Signal(dict)  # info o otwartym pliku: fps, liczba klatek, długość
     frame_processed = Signal(np.ndarray, dict)  # klatka obrazu (BGR) i wynik klatki
     event_detected = Signal(dict)  # zdarzenie asymetrii
+    wyniki_calego_filmu = Signal(list)  # wyniki wszystkich klatek naraz (tryb CALY_FILM_OD_RAZU)
     finished = Signal()  # koniec pliku wideo
     error = Signal(str)  # komunikat błędu
 
@@ -91,6 +95,8 @@ class MockWorker(QObject):
                 "duration": dlugosc,
             }
         )
+        if CALY_FILM_OD_RAZU:
+            self._policz_caly_film()
 
     @Slot()
     def start(self):
@@ -150,8 +156,40 @@ class MockWorker(QObject):
         # Zapamiętujemy ustawienia. Wybrane stawy wpływają na kąty i SI (jak w prawdziwym potoku).
         # Progi wpływają na wykrywanie zdarzeń. Typ ćwiczenia na razie tylko zapamiętujemy.
         self._ustawienia = dict(ustawienia)
-        # Nowe progi albo stawy = wykrywanie od czystego stanu, od bieżącej klatki
-        self._zacznij_sledzenie(max(self._klatka - 1, 0))
+        if CALY_FILM_OD_RAZU and self._film_otwarty():
+            # Nowe progi albo stawy zmieniają cały przebieg, więc liczymy film od nowa
+            self._policz_caly_film()
+        else:
+            # Nowe progi albo stawy = wykrywanie od czystego stanu, od bieżącej klatki
+            self._zacznij_sledzenie(max(self._klatka - 1, 0))
+
+    def _film_otwarty(self):
+        """True, gdy plik jest otwarty i znamy jego liczbę klatek (potrzebną do liczenia całości)."""
+        return self._cap is not None and self._liczba_klatek is not None
+
+    def _policz_caly_film(self):
+        """Liczy wyniki wszystkich klatek naraz i wysyła je do GUI jednym sygnałem.
+
+        Atrapa zależy tylko od numeru klatki i fps, więc nie trzeba czytać wideo ani przewijać.
+        Pozycja odtwarzania się nie zmienia. W prawdziwym potoku ten etap będzie działał w tle.
+        """
+        liczba = self._liczba_klatek
+        wyniki = []
+        self._zacznij_sledzenie(0)  # liczymy od początku, więc zdarzenia mają znany początek
+        try:
+            for numer in range(liczba):
+                wynik = self._zbuduj_wynik(numer)
+                self._sledz_zdarzenia(wynik["timestamp"], wynik["si"])  # zdarzenia lecą do GUI od razu
+                # Wykres potrzebuje tylko numeru, czasu i SI. Kąty i landmarks pomijamy, żeby nie trzymać ich w pamięci.
+                wyniki.append({"frame_idx": numer, "timestamp": wynik["timestamp"], "si": wynik["si"]})
+            self._zamknij_wszystkie(liczba / self._fps)  # zdarzenia w toku kończą się na końcu filmu
+        except Exception as blad:
+            self.error.emit(f"Atrapa potoku: {blad}")
+            return
+        finally:
+            # Wracamy do stanu wykrywania dla bieżącej pozycji odtwarzania
+            self._zacznij_sledzenie(max(self._klatka - 1, 0))
+        self.wyniki_calego_filmu.emit(wyniki)
 
     def _analizowane_stawy(self):
         # Bez ustawień analizujemy wszystkie stawy z listy domyślnej

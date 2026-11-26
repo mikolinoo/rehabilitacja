@@ -110,6 +110,8 @@ class MainWindow(QMainWindow):
     def _utworz_uklad(self):
         # Poziomy splitter: [wideo z suwakiem | panel boczny]
         gorna = QSplitter(Qt.Orientation.Horizontal)
+        # Bez tego przeciągnięcie granicy do końca chowa panel do zera i jego zawartość znika
+        gorna.setChildrenCollapsible(False)
         gorna.addWidget(self._utworz_panel_wideo())
         gorna.addWidget(self._utworz_panel_boczny())
         gorna.setStretchFactor(0, 3)  # przy zmianie rozmiaru okna wideo rośnie szybciej
@@ -117,6 +119,7 @@ class MainWindow(QMainWindow):
 
         # Pionowy splitter: [górna część | timeline]
         calosc = QSplitter(Qt.Orientation.Vertical)
+        calosc.setChildrenCollapsible(False)  # jak wyżej: wykres i górna część nie mogą zniknąć
         calosc.addWidget(gorna)
         calosc.addWidget(self._utworz_panel_timeline())
         calosc.setStretchFactor(0, 4)
@@ -127,9 +130,14 @@ class MainWindow(QMainWindow):
     def _utworz_panel_boczny(self):
         # Pionowy splitter: [kąty i ostrzeżenia | ustawienia]
         boczny = QSplitter(Qt.Orientation.Vertical)
+        boczny.setChildrenCollapsible(False)  # ostrzeżenia i ustawienia nie mogą zniknąć
         boczny.addWidget(self._utworz_panel_katow())
         boczny.addWidget(self._utworz_panel_ustawien())
-        boczny.setSizes([300, 150])
+        # Ustawienia startują w najmniejszym rozmiarze, w jakim się jeszcze mieszczą (minimum panelu).
+        # Dzięki temu lista ostrzeżeń ma najwięcej miejsca. Przy zmianie rozmiaru okna rośnie góra.
+        boczny.setStretchFactor(0, 1)
+        boczny.setStretchFactor(1, 0)
+        boczny.setSizes([300, self._panel_ustawien.minimumSizeHint().height()])
         return boczny
 
     # Panele: wideo, wykres i zaślepki-------------------------------
@@ -207,6 +215,7 @@ class MainWindow(QMainWindow):
         self._worker.source_opened.connect(self._na_zrodlo)
         self._worker.frame_processed.connect(self._na_klatke)
         self._worker.event_detected.connect(self._na_zdarzenie)
+        self._worker.wyniki_calego_filmu.connect(self._na_caly_film)  # tryb CALY_FILM_OD_RAZU
         self._worker.error.connect(self._na_blad)
         self._worker.finished.connect(self._na_koniec)
 
@@ -316,6 +325,15 @@ class MainWindow(QMainWindow):
         # Panel boczny pokazuje kąty tej klatki od razu, także po przewinięciu w pauzie
         self._panel.pokaz_wynik(wynik)
         self._odswiez_pozycje()
+
+    def _na_caly_film(self, wyniki):
+        # Worker policzył cały film naraz. Wpisujemy wyniki do bufora tak jak klatki na żywo,
+        # a wykres przerysuje się w najbliższym odświeżeniu (co 100 ms).
+        for wynik in wyniki:
+            numer = bezpieczny_odczyt(wynik, "frame_idx")
+            if numer is not None:
+                self._zapisz_wynik(numer, wynik)
+        self._wyniki_zmienione = True
 
     def _zapisz_wynik(self, numer, wynik):
         self._wyniki[numer] = wynik  # nadpisuje wpis, jeśli ta klatka już była

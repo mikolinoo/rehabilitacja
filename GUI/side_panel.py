@@ -81,7 +81,8 @@ class SidePanel(QWidget):
         self._tabela.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         # Stała wysokość wiersza i minimalna wysokość tabeli, żeby wszystkie stawy były widoczne bez przewijania
         self._tabela.verticalHeader().setDefaultSectionSize(26)
-        self._tabela.setMinimumHeight(36 + 26 * len(DEFAULT_JOINTS))
+        # Stała wysokość (nagłówek + wiersze). Bez tego tabela rośnie i zabiera miejsce liście ostrzeżeń.
+        self._tabela.setFixedHeight(36 + 26 * len(DEFAULT_JOINTS) + 4)
 
         # Nazwy stawów wpisujemy raz, bo się nie zmieniają. Wartości idą w pokaz_wynik().
         for wiersz, staw in enumerate(DEFAULT_JOINTS):
@@ -100,6 +101,8 @@ class SidePanel(QWidget):
         uklad.addWidget(self._tabela)
         uklad.addWidget(self._etykieta_ostrzezen)
         uklad.addWidget(self._lista_ostrzezen, 1)  # lista dostaje resztę wysokości panelu
+        szerokosc_paska = self._lista_ostrzezen.verticalScrollBar().sizeHint().width()
+        self._lista_ostrzezen.setStyleSheet(f"QScrollBar:vertical {{ width: {2 * szerokosc_paska}px; }}")
 
         self.wyczysc()
 

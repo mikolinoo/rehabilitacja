@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -72,11 +73,15 @@ class SettingsPanel(QWidget):
         przycisk = QPushButton("Przywróć domyślne")
         przycisk.clicked.connect(self._przywroc_domyslne)
 
+        # Trzy sekcje obok siebie (kolumnami), a nie jedna pod drugą. Dzięki temu panel jest niski
+        # i zostaje więcej miejsca na listę ostrzeżeń w panelu bocznym.
+        kolumny = QHBoxLayout()
+        kolumny.addWidget(grupa_stawy)
+        kolumny.addWidget(grupa_typ)
+        kolumny.addWidget(grupa_progi)
+
         uklad = QVBoxLayout(self)
-        uklad.addWidget(grupa_progi)
-        uklad.addWidget(grupa_typ)
-        uklad.addWidget(grupa_stawy)
-        uklad.addStretch(1)  # wolne miejsce ląduje pod spodem, a nie między sekcjami
+        uklad.addLayout(kolumny)
         uklad.addWidget(przycisk)
 
         self._odswiez_blokady()
