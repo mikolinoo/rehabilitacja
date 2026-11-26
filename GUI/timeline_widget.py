@@ -32,6 +32,33 @@ def _pedzel(kolor, przezroczystosc):
     return pg.mkBrush(barwa)
 
 
+def _z_sasiadami(maska):
+    """Rozszerza maskę punktów o ich sąsiadów (o jeden punkt w lewo i w prawo).
+
+    Dzięki temu krzywa danego poziomu zawiera też punkt z sąsiedniego poziomu tuż przy granicy.
+    Odcinek między nimi się rysuje, więc linia nie urywa się przy zmianie koloru.
+    """
+    rozszerzona = maska.copy()
+    rozszerzona[1:] |= maska[:-1]
+    rozszerzona[:-1] |= maska[1:]
+    return rozszerzona
+
+
+def _zakres_y(si, alarm):
+    """Zakres osi Y jako (dół, góra). Każda strona liczona osobno, każda z 10 % zapasu, najwyżej ±100 %.
+
+    Góra: najwyższa wartość albo próg alarmu, jeśli jest wyżej. Dół: najniższa wartość, ale zawsze
+    trochę pod zerem (co najmniej −2 %), żeby linia 0 % nie leżała na samej krawędzi wykresu.
+    Gdy nic nie leży poniżej zera, dół jest tylko takim zapasem, więc połowa wykresu nie jest pusta.
+    """
+    skonczone = si[np.isfinite(si)]  # NaN (brak danych) pomijamy
+    najwyzsza = max(float(skonczone.max()) if skonczone.size else 0.0, alarm, 1.0)
+    najnizsza = min(float(skonczone.min()) if skonczone.size else 0.0, 0.0)
+    gora = min(100.0, najwyzsza * 1.1)
+    dol = max(-100.0, min(najnizsza * 1.1, -2.0))
+    return dol, gora
+
+
 def _klucz_zdarzenia(zdarzenie):
     """Pozwala rozpoznać to samo zdarzenie: staw i czas startu."""
     return zdarzenie.get("joint"), zdarzenie.get("start")
@@ -115,9 +142,13 @@ class TimelineWidget(pg.PlotWidget):
             POZIOM_OK: si < warning,
         }
         for poziom, krzywa in self._krzywe.items():
-            wartosci = np.where(poziomy[poziom], si, np.nan)  # poza swoim poziomem punkt znika
+            # Poza swoim poziomem punkt znika, ale z jednym sąsiadem na granicy (patrz _z_sasiadami)
+            wartosci = np.where(_z_sasiadami(poziomy[poziom]), si, np.nan)
             # setData zastępuje poprzednią krzywą; connect="finite" robi przerwy zamiast prostych do zera
             krzywa.setData(times, wartosci, connect="finite")
+        # Zakres Y ustawiamy ręcznie, więc pyqtgraph go już nie dopasowuje sam
+        dol, gora = _zakres_y(si, alarm)
+        self.setYRange(dol, gora, padding=0)
 
     def ustaw_zakres_czasu(self, dlugosc_s):
         """Ustawia oś X od 0 do długości filmu w sekundach. None przywraca automatyczny zakres."""
