@@ -6,10 +6,12 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QSplitter, QToolBar, QVBoxLayout, QWidget
 
 from GUI.gui_data_format import bezpieczny_odczyt
+from GUI.kolory import PROG_ALARMU_DOMYSLNY, PROG_OSTRZEZENIA_DOMYSLNY
 from GUI.mock_worker import MockWorker
 from GUI.seek_bar import SeekBar
 from GUI.settings_panel import SettingsPanel
 from GUI.side_panel import SidePanel
+from GUI.szkielet import kolory_stawow, rysuj_szkielet
 from GUI.timeline_widget import TimelineWidget
 from GUI.video_widget import VideoWidget
 
@@ -62,6 +64,12 @@ class MainWindow(QMainWindow):
         self._biezaca_klatka = 0  # numer klatki, którą właśnie pokazujemy
         self._ostatni_czas = 0.0
         self._na_koncu = False  # True, gdy odtwarzanie dobiegło końca
+        # Ostatnio pokazana klatka (surowa, bez szkieletu) i jej wynik. Dzięki temu po zmianie przełącznika
+        # albo progów przerysowujemy tę samą klatkę, także w pauzie.
+        self._ostatnia = None
+        self._pokaz_szkielet = True  # stan przełącznika „Pokaż szkielet”
+        self._progi = (PROG_OSTRZEZENIA_DOMYSLNY, PROG_ALARMU_DOMYSLNY)  # (uwaga, alarm) do kolorów kółek
+        self._analizowane = []  # stawy wybrane w ustawieniach, ustawiane w _na_ustawienia
 
         # Informacje o otwartym pliku. Ustawiamy je, gdy worker potwierdzi otwarcie.
         self._nazwa_pliku = None
@@ -103,6 +111,13 @@ class MainWindow(QMainWindow):
         akcja_reset = QAction("Reset", self)
         akcja_reset.triggered.connect(self._reset)
         pasek.addAction(akcja_reset)
+
+        # Przełącznik szkieletu: domyślnie włączony. Zmiana od razu przerysowuje bieżącą klatkę.
+        self._akcja_szkielet = QAction("Pokaż szkielet", self)
+        self._akcja_szkielet.setCheckable(True)
+        self._akcja_szkielet.setChecked(True)  # ustawiamy przed podłączeniem sygnału, więc bez wywołania
+        self._akcja_szkielet.toggled.connect(self._przelacz_szkielet)
+        pasek.addAction(self._akcja_szkielet)
 
         pasek.addAction(QAction("Eksport", self))  # jeszcze bez działania
 
@@ -314,7 +329,8 @@ class MainWindow(QMainWindow):
         self._aktualizuj_etykiete()
 
     def _na_klatke(self, ramka, wynik):
-        self._wideo.show_frame(ramka)
+        self._ostatnia = (ramka, wynik)
+        self._pokaz_klatke()
         numer = bezpieczny_odczyt(wynik, "frame_idx")
         if numer is not None:
             self._zapisz_wynik(numer, wynik)
@@ -325,6 +341,23 @@ class MainWindow(QMainWindow):
         # Panel boczny pokazuje kąty tej klatki od razu, także po przewinięciu w pauzie
         self._panel.pokaz_wynik(wynik)
         self._odswiez_pozycje()
+
+    def _pokaz_klatke(self):
+        """Jedno miejsce, przez które klatka trafia na ekran: najpierw szkielet, potem wyświetlenie.
+
+        rysuj_szkielet tworzy kopię klatki, więc oryginał z workera zostaje czysty i nie dostaje kresek z poprzednich klatek.
+        """
+        if self._ostatnia is None:
+            return  # jeszcze żadnej klatki nie było
+        ramka, wynik = self._ostatnia
+        if self._pokaz_szkielet:
+            kolory = kolory_stawow(bezpieczny_odczyt(wynik, "si"), self._analizowane, *self._progi)
+            ramka = rysuj_szkielet(ramka, bezpieczny_odczyt(wynik, "landmarks"), kolory)
+        self._wideo.show_frame(ramka)
+
+    def _przelacz_szkielet(self, wlaczony):
+        self._pokaz_szkielet = wlaczony
+        self._pokaz_klatke()  # przerysowujemy bieżącą klatkę od razu, także w pauzie
 
     def _na_caly_film(self, wyniki):
         # Worker policzył cały film naraz. Wpisujemy wyniki do bufora tak jak klatki na żywo,
@@ -356,6 +389,10 @@ class MainWindow(QMainWindow):
         self._timeline.set_thresholds(progi["warning"], progi["alarm"])
         self._panel.ustaw_progi(progi["warning"], progi["alarm"])
         stawy = list(ustawienia["joints"])
+        # Kolory kółek zależą od progów i wybranych stawów, więc zapamiętujemy je i przerysowujemy klatkę
+        self._analizowane = stawy
+        self._progi = (progi["warning"], progi["alarm"])
+        self._pokaz_klatke()
         self._timeline.ustaw_opis_stawow(stawy)
         # Krzywa SI to średnia z wybranych stawów, więc zmiana wyboru unieważnia bufor.
         # Zmiana samych progów tego nie robi (zmieniają tylko kolory).

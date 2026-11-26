@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 
-from GUI.gui_data_format import DEFAULT_JOINTS, LICZBA_LANDMARKS
+from GUI.gui_data_format import DEFAULT_JOINTS
 
 FPS_DOMYSLNY = 30  # tempo bez pliku (czarna klatka) i wtedy, gdy plik nie podaje swojego fps
 
@@ -234,7 +234,7 @@ class MockWorker(QObject):
             "timestamp": round(t, 3),
             "angles": katy,
             "si": si,
-            "landmarks": self._landmarks_atrapy(t, numer),
+            "landmarks": self._landmarks_atrapy(katy, numer),
         }
 
     def _katy_atrapy(self, t, numer):
@@ -278,17 +278,51 @@ class MockWorker(QObject):
         si["total"] = sum(dostepne) / len(dostepne) if dostepne else None
         return si
 
-    def _landmarks_atrapy(self, t, numer):
-        """33 punkty szkieletu krążące wokół środka kadru. None oznacza 'brak osoby'."""
+    def _landmarks_atrapy(self, katy, numer):
+        """Punkty prostej, stojącej sylwetki: słownik nazwa → (x, y, visibility). None = brak osoby.
+
+        Współrzędne 0–1 w układzie obrazu: x rośnie w prawo, y w dół. Strony „left”/„right” to strony
+        osoby, a osoba stoi twarzą do kamery, więc „left” wypada po prawej stronie obrazu.
+        Ręce zginają się zgodnie z sztucznymi kątami łokci, więc asymetria widać na szkielecie.
+        """
         if (numer % 450) in range(400, 430):
             return None  # przez chwilę nie ma osoby w kadrze
-        punkty = []
-        for k in range(LICZBA_LANDMARKS):
-            kat = 2 * math.pi * k / LICZBA_LANDMARKS + t
-            x = 0.5 + 0.1 * math.cos(kat)  # współrzędne 0–1, tak jak u MediaPipe
-            y = 0.5 + 0.3 * math.sin(kat)
-            punkty.append((x, y, 0.95))  # 0.95 to pewność, że punkt jest widoczny
+        widocznosc = 0.95  # pewność, że punkt jest widoczny
+        punkty = {}
+        for strona, znak in (("left", 1.0), ("right", -1.0)):
+            x_bark = 0.5 + znak * 0.08
+            punkty[f"{strona}_shoulder"] = (x_bark, 0.30, widocznosc)
+            punkty[f"{strona}_hip"] = (0.5 + znak * 0.05, 0.55, widocznosc)
+            punkty[f"{strona}_knee"] = (0.5 + znak * 0.05, 0.75, widocznosc)
+            punkty[f"{strona}_ankle"] = (0.5 + znak * 0.04, 0.93, widocznosc)
+            # Łokieć jest 0.12 pod barkiem, przedramię ma długość 0.12. Jego kąt zależy od kąta łokcia:
+            # 180° = ręka prosta w dół, mniejszy kąt = mocniejsze zgięcie (dłoń idzie w górę i do przodu).
+            alfa = math.radians(180.0 - self._kat_lokcia(katy, strona))
+            punkty[f"{strona}_elbow"] = (x_bark, 0.42, widocznosc)
+            punkty[f"{strona}_wrist"] = (
+                x_bark + znak * 0.12 * math.sin(alfa),
+                0.42 + 0.12 * math.cos(alfa),
+                widocznosc,
+            )
+
+        # Testy odporności GUI, każdy w innym miejscu cyklu 300 klatek
+        w_cyklu = numer % 300
+        if w_cyklu in range(120, 135):
+            del punkty["left_ankle"]  # brak jednego punktu
+        if w_cyklu in range(200, 215):
+            x, y, _ = punkty["right_wrist"]
+            punkty["right_wrist"] = (x, y, 0.3)  # słaba widoczność, poniżej progu 0.5
+        if w_cyklu in range(240, 250):
+            _, y, vis = punkty["left_wrist"]
+            punkty["left_wrist"] = (1.3, y, vis)  # punkt poza kadrem
         return punkty
+
+    def _kat_lokcia(self, katy, strona):
+        """Kąt łokcia dla strony (w katy: „L” albo „R”). Gdy łokieć nie jest analizowany, bierzemy kąt środkowy."""
+        dane = katy.get("elbow")
+        if dane is None:
+            return KAT_SRODKOWY
+        return dane["L" if strona == "left" else "R"]
 
     def _progi(self):
         """Progi (uwaga, alarm) z ustawień GUI, a gdy ich brak – wartości domyślne atrapy."""
