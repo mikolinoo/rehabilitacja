@@ -1,9 +1,11 @@
 import math
+from pathlib import Path
 
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 
+from GUI.adapter_csv import BladCsv, wczytaj_csv_landmarks
 from GUI.gui_data_format import DEFAULT_JOINTS
 
 FPS_DOMYSLNY = 30  # tempo bez pliku (czarna klatka) i wtedy, gdy plik nie podaje swojego fps
@@ -40,11 +42,16 @@ class MockWorker(QObject):
     wyniki_calego_filmu = Signal(list)  # wyniki wszystkich klatek naraz (tryb CALY_FILM_OD_RAZU)
     finished = Signal()  # koniec pliku wideo
     error = Signal(str)  # komunikat błędu
+    dane_zrodla = Signal(dict)  # skąd są dane (CSV czy atrapa) i ostrzeżenia dla paska stanu
 
     def __init__(self):
         super().__init__()
         self._cap = None  # otwarty plik wideo (cv2.VideoCapture); None oznacza tryb bez pliku
         self._sciezka = None  # ścieżka do pliku, potrzebna, żeby Reset mógł otworzyć go od nowa
+        # Dane z CSV {numer klatki: wynik} albo None, gdy działa atrapa. Ustawia je _ustaw_csv
+        self._csv = None
+        self._csv_nazwa = None  # nazwa pliku CSV, do paska stanu
+        self._ostrzezenie_csv = None  # np. CSV o tej samej nazwie był uszkodzony
         self._fps = FPS_DOMYSLNY
         self._klatka = 0  # numer bieżącej klatki
         self._ustawienia = {}  # ustawienia przekazane przez set_settings
@@ -66,37 +73,122 @@ class MockWorker(QObject):
     # ------------------------------------------------------------------
     @Slot(str)
     def open_source(self, sciezka):
-        """Otwiera plik wideo i ustawia odtwarzanie na pierwszą klatkę."""
+        """Otwiera plik wideo i ustawia odtwarzanie na pierwszą klatkę. Szuka CSV o tej samej nazwie."""
+        self._otworz(sciezka, zachowaj_csv=False)
+
+    @Slot(str)
+    def wczytaj_csv(self, sciezka):
+        """Ręczny wybór CSV dla otwartego filmu. Pozycja odtwarzania zostaje bez zmian."""
+        if self._cap is None:
+            return  # bez filmu nie ma do czego dopasować danych
+        blad = self._ustaw_csv(sciezka)
+        if blad is not None:
+            self.error.emit(blad)  # zły CSV nie zmienia danych, które już są
+            return
+        self._wyslij_zrodlo()
+        if CALY_FILM_OD_RAZU:
+            self._policz_caly_film()
+        # Odświeżamy bieżącą klatkę, żeby szkielet od razu pokazał nowe punkty (także w pauzie)
+        self.seek(max(self._klatka - 1, 0))
+
+    def _otworz(self, sciezka, zachowaj_csv):
+        """Wspólna część otwierania filmu. zachowaj_csv=True przy Reset: zostają dane z CSV już wczytane."""
         self._timer.stop()
-        if self._cap is not None:
-            self._cap.release()  # zwalniamy poprzedni plik, zanim otworzymy nowy
-            self._cap = None
+        self._zwolnij_plik()  # zwalniamy poprzedni plik, zanim otworzymy nowy
         cap = cv2.VideoCapture(sciezka)
         if not cap.isOpened():
             self._sciezka = None  # nieudany plik nie może zostać w pamięci jako ostatni
             self.error.emit(f"Nie udało się otworzyć pliku: {sciezka} (zły format lub brak kodeka)")
             return
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = fps if fps and fps > 0 else FPS_DOMYSLNY
+        # Liczymy klatki sami, bo CAP_PROP_FRAME_COUNT bywa zawyżony (np. w filmach z telefonu)
+        liczba_klatek = self._policz_klatki(cap)
+        cap.release()
+        if liczba_klatek == 0:
+            self._sciezka = None
+            self.error.emit(f"Plik nie zawiera klatek: {sciezka}")
+            return
+        # Drugie otwarcie zaczyna odtwarzanie od pierwszej klatki (po liczeniu pozycja jest na końcu)
+        cap = cv2.VideoCapture(sciezka)
         self._cap = cap
         self._sciezka = sciezka
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        self._fps = fps if fps and fps > 0 else FPS_DOMYSLNY
-        liczba_klatek = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self._fps = fps
+        self._liczba_klatek = liczba_klatek
         self._timer.setInterval(max(1, round(1000 / self._fps)))  # np. 30 fps daje 33 ms
         self._klatka = 0
         self._zacznij_sledzenie(0)
-        self._liczba_klatek = liczba_klatek if liczba_klatek > 0 else None
-        # Długość filmu liczymy z liczby klatek i fps. Niektóre pliki nie podają liczby klatek (0 albo -1).
-        dlugosc = liczba_klatek / self._fps if liczba_klatek > 0 else None
+        if not zachowaj_csv:
+            self._csv = None
+            self._ostrzezenie_csv = None
+            self._szukaj_csv(sciezka)
+        # Długość liczymy z policzonych klatek i fps pliku
         self.source_opened.emit(
             {
                 "path": sciezka,
                 "fps": self._fps,
-                "frame_count": liczba_klatek if liczba_klatek > 0 else None,
-                "duration": dlugosc,
+                "frame_count": liczba_klatek,
+                "duration": liczba_klatek / self._fps,
             }
         )
+        self._wyslij_zrodlo()
         if CALY_FILM_OD_RAZU:
             self._policz_caly_film()
+
+    def _zwolnij_plik(self):
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+    @staticmethod
+    def _policz_klatki(cap):
+        """Liczy klatki, czytając cały plik. grab() przechodzi do następnej klatki bez zamiany jej na obraz, więc jest szybkie."""
+        liczba = 0
+        while cap.grab():
+            liczba += 1
+        return liczba
+
+    def _szukaj_csv(self, sciezka_filmu):
+        """CSV o tej samej nazwie co film (film.MP4 → film.csv). Brak pliku nie jest błędem: wtedy atrapa."""
+        kandydat = Path(sciezka_filmu).with_suffix(".csv")
+        if not kandydat.is_file():
+            return
+        self._ostrzezenie_csv = self._ustaw_csv(kandydat)
+
+    def _ustaw_csv(self, sciezka_csv):
+        """Wczytuje CSV jako źródło danych. Zwraca tekst błędu albo None, gdy się udało."""
+        try:
+            dane = wczytaj_csv_landmarks(sciezka_csv)
+        except BladCsv as blad:
+            return f"nie wczytano {Path(sciezka_csv).name}: {blad}"
+        self._csv = dane
+        self._csv_nazwa = Path(sciezka_csv).name
+        return None
+
+    def _wyslij_zrodlo(self):
+        """Mówi GUI, skąd są dane (CSV czy atrapa) i czy coś jest nie tak, np. inna liczba klatek."""
+        if self._csv is None:
+            info = {
+                "typ": "atrapa",
+                "nazwa": None,
+                "klatek": None,
+                "ma_katy_i_si": True,
+                "ostrzezenie": self._ostrzezenie_csv,
+            }
+        else:
+            liczba_csv = len(self._csv)
+            ostrzezenie = None
+            # Różnica do 2 klatek to zwykle końcówka nagrania. Większa znaczy, że CSV może być z innego filmu
+            if self._liczba_klatek is not None and abs(self._liczba_klatek - liczba_csv) > 2:
+                ostrzezenie = f"liczba klatek nie zgadza się: film {self._liczba_klatek}, CSV {liczba_csv}"
+            info = {
+                "typ": "csv",
+                "nazwa": self._csv_nazwa,
+                "klatek": liczba_csv,
+                "ma_katy_i_si": False,  # CSV ma tylko punkty, kąty i SI liczy zespół
+                "ostrzezenie": ostrzezenie,
+            }
+        self.dane_zrodla.emit(info)
 
     @Slot()
     def start(self):
@@ -112,7 +204,7 @@ class MockWorker(QObject):
     def reset(self):
         """Od nowa: wraca na pierwszą klatkę, otwierając plik ponownie."""
         if self._sciezka is not None:
-            self.open_source(self._sciezka)
+            self._otworz(self._sciezka, zachowaj_csv=True)
         else:
             self._klatka = 0
             self._zacznij_sledzenie(0)
@@ -227,6 +319,8 @@ class MockWorker(QObject):
         Dzięki temu po przewinięciu ta sama klatka zawsze ma te same wartości.
         """
         t = numer / self._fps  # czas liczymy z numeru klatki, nie z zegara ściennego
+        if self._csv is not None:
+            return self._wynik_z_csv(numer, t)
         katy = self._katy_atrapy(t, numer)
         si = self._si_atrapy(katy)
         return {
@@ -235,6 +329,20 @@ class MockWorker(QObject):
             "angles": katy,
             "si": si,
             "landmarks": self._landmarks_atrapy(katy, numer),
+        }
+
+    def _wynik_z_csv(self, numer, t):
+        """Wynik klatki z CSV: tylko punkty. Kąty i SI są None, bo ich nie ma w pliku."""
+        wiersz = self._csv.get(numer)
+        if wiersz is None:
+            # Klatki bez wiersza w CSV traktujemy jak brak osoby. Czas liczymy z numeru klatki.
+            return {"frame_idx": numer, "timestamp": round(t, 3), "angles": None, "si": None, "landmarks": None}
+        return {
+            "frame_idx": numer,
+            "timestamp": wiersz["timestamp"],  # czas z CSV (time_s), bo odstępy między klatkami są nierówne
+            "angles": None,
+            "si": None,
+            "landmarks": wiersz["landmarks"],
         }
 
     def _katy_atrapy(self, t, numer):
@@ -343,7 +451,7 @@ class MockWorker(QObject):
         wynik = self._zbuduj_wynik(numer)
         warning, _ = self._progi()
         for staw in self._analizowane_stawy():
-            si = wynik["si"].get(staw)
+            si = (wynik["si"] or {}).get(staw)  # z CSV SI nie ma (None), wtedy nic nie oznaczamy
             if si is not None and si >= warning:
                 self._pominiete.add(staw)
 
@@ -353,6 +461,8 @@ class MockWorker(QObject):
         Zdarzenie zaczyna się, gdy SI stawu wejdzie na poziom uwagi (≥ próg uwagi), a kończy,
         gdy spadnie poniżej. Działa osobno dla każdego stawu.
         """
+        if si is None:
+            return  # dane bez SI (CSV) nie dają zdarzeń
         warning, _ = self._progi()
         for staw in self._analizowane_stawy():
             wartosc = si.get(staw)

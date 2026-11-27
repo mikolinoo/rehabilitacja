@@ -46,6 +46,7 @@ class MainWindow(QMainWindow):
     sygnal_reset = Signal()  # od nowa, na pierwszą klatkę
     sygnal_przewin = Signal(int)  # numer klatki, do której przewijamy
     sygnal_ustawienia = Signal(dict)  # progi, typ ćwiczenia i stawy (format z format_danych_gui.md)
+    sygnal_wczytaj_csv = Signal(str)  # ścieżka do CSV z punktami dla otwartego filmu
 
     def __init__(self):
         super().__init__()  # konstruktor QMainWindow; bez tego okno się nie zbuduje
@@ -72,6 +73,8 @@ class MainWindow(QMainWindow):
         self._analizowane = []  # stawy wybrane w ustawieniach, ustawiane w _na_ustawienia
 
         # Informacje o otwartym pliku. Ustawiamy je, gdy worker potwierdzi otwarcie.
+        self._sciezka_filmu = None  # pełna ścieżka, potrzebna do ustawienia folderu w oknie „Wczytaj CSV”
+        self._info_danych = None  # skąd są dane (CSV czy atrapa), z sygnału dane_zrodla
         self._nazwa_pliku = None
         self._fps = None
         self._dlugosc = None  # w sekundach; None, gdy nieznana albo brak pliku
@@ -94,6 +97,13 @@ class MainWindow(QMainWindow):
         akcja_otworz = QAction("Otwórz plik", self)
         akcja_otworz.triggered.connect(self._otworz_plik)
         pasek.addAction(akcja_otworz)
+
+        # CSV z punktami dla otwartego filmu. Dopóki nie ma filmu, nie ma do czego go dopasować.
+        self._akcja_csv = QAction("Wczytaj CSV…", self)
+        self._akcja_csv.triggered.connect(self._wczytaj_csv)
+        self._akcja_csv.setEnabled(False)
+        self._akcja_csv.setToolTip("Najpierw otwórz plik wideo")
+        pasek.addAction(self._akcja_csv)
 
         pasek.addAction(QAction("Kamera", self))  # jeszcze bez działania
 
@@ -207,7 +217,23 @@ class MainWindow(QMainWindow):
             tekst = f"Czas: {czas} s"
         else:
             tekst = f"{self._nazwa_pliku} | {self._fps:.0f} fps | {czas} / {self._dlugosc:.1f} s"
+        if self._info_danych is not None:
+            tekst = f"{self._opis_danych()} | {tekst}"  # źródło danych przed czasem
         self._etykieta_czasu.setText(tekst)
+
+    def _opis_danych(self):
+        """Tekst o źródle danych, np. „Dane: nazwa.csv (328 klatek), bez kątów i SI”."""
+        info = self._info_danych
+        if bezpieczny_odczyt(info, "typ") == "csv":
+            tekst = f"Dane: {info['nazwa']} ({info['klatek']} klatek)"
+            if not info.get("ma_katy_i_si"):
+                tekst += ", bez kątów i SI"  # CSV ma tylko punkty, więc kółka stawów są szare
+        else:
+            tekst = "Dane: atrapa"
+        ostrzezenie = bezpieczny_odczyt(info, "ostrzezenie")
+        if ostrzezenie:
+            tekst += f" – uwaga: {ostrzezenie}"
+        return tekst
 
     # Wątek workera-------------------------------------------------
     def _utworz_watek(self):
@@ -225,9 +251,11 @@ class MainWindow(QMainWindow):
         self.sygnal_reset.connect(self._worker.reset)
         self.sygnal_przewin.connect(self._worker.seek)
         self.sygnal_ustawienia.connect(self._worker.set_settings)
+        self.sygnal_wczytaj_csv.connect(self._worker.wczytaj_csv)
 
         # worker -> GUI
         self._worker.source_opened.connect(self._na_zrodlo)
+        self._worker.dane_zrodla.connect(self._na_dane_zrodla)
         self._worker.frame_processed.connect(self._na_klatke)
         self._worker.event_detected.connect(self._na_zdarzenie)
         self._worker.wyniki_calego_filmu.connect(self._na_caly_film)  # tryb CALY_FILM_OD_RAZU
@@ -246,10 +274,22 @@ class MainWindow(QMainWindow):
         self._akcja_start.setChecked(False)  # nowy film zaczyna się w pauzie
         # Blokujemy Start do potwierdzenia otwarcia. Gdyby plik się nie otworzył, nie odtworzymy pustego źródła.
         self._akcja_start.setEnabled(False)
+        self._akcja_csv.setEnabled(False)
+        self._info_danych = None
         self._suwak.ustaw_zakres(None, None)  # suwak nieaktywny do potwierdzenia otwarcia
         self._wyczysc_wyniki()
         self.sygnal_otworz.emit(sciezka)
         self.statusBar().showMessage(f"Otwieranie: {Path(sciezka).name}")
+
+    def _wczytaj_csv(self):
+        # Folder okna ustawiamy na folder filmu, bo CSV zwykle leży obok niego
+        folder = str(Path(self._sciezka_filmu).parent) if self._sciezka_filmu else ""
+        sciezka, _ = QFileDialog.getOpenFileName(
+            self, "Wybierz plik CSV z punktami", folder, "Pliki CSV (*.csv);;Wszystkie pliki (*)"
+        )
+        if not sciezka:  # użytkownik kliknął Anuluj
+            return
+        self.sygnal_wczytaj_csv.emit(sciezka)
 
     def _przelacz_start_stop(self, wlaczony):
         self._akcja_start.setText("Stop" if wlaczony else "Start")  # napis zgodny ze stanem
@@ -318,6 +358,7 @@ class MainWindow(QMainWindow):
     # Sloty GUI: uruchamiane w wątku okna, gdy worker wyśle sygnał-----------
     def _na_zrodlo(self, info):
         # Worker potwierdził otwarcie pliku. Zapamiętujemy dane i ustawiamy oś X na długość filmu.
+        self._sciezka_filmu = info["path"]
         self._nazwa_pliku = Path(info["path"]).name
         self._fps = info["fps"]
         self._dlugosc = info["duration"]
@@ -326,6 +367,20 @@ class MainWindow(QMainWindow):
         self._suwak.ustaw_zakres(self._liczba_klatek, self._fps)
         self._akcja_start.setEnabled(True)  # film jest, więc można odtwarzać
         self._akcja_start.setToolTip("")
+        self._akcja_csv.setEnabled(True)  # film jest, więc można dopasować CSV
+        self._akcja_csv.setToolTip("")
+        self._aktualizuj_etykiete()
+
+    def _na_dane_zrodla(self, info):
+        # Nowe dane (CSV albo atrapa) zastępują wszystko, co liczyliśmy wcześniej, bo wyniki i zdarzenia
+        # z poprzedniego źródła nie pasują do nowego. Worker wyśle wyniki zaraz po tym sygnale.
+        self._info_danych = info
+        self._wyniki.clear()
+        self._wyniki_zmienione = True
+        self._wyczysc_zdarzenia()
+        ostrzezenie = bezpieczny_odczyt(info, "ostrzezenie")
+        if ostrzezenie:
+            self.statusBar().showMessage(f"Uwaga: {ostrzezenie}")
         self._aktualizuj_etykiete()
 
     def _na_klatke(self, ramka, wynik):
