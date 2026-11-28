@@ -4,5 +4,6 @@ __pycache__/
 *.mp4
 *.avi
 *.csv
-docs/*.md
-CLAUDE.md
+*.md
+!docs/integracja.md
+!docs/format_danych_gui.md

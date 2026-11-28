@@ -1,7 +1,7 @@
 """Adapter: plik CSV z punktami szkieletu → wynik klatki w formacie GUI.
 
 Adapter tylko tłumaczy zapis. Kątów ani SI nie liczy, bo to zadanie zespołu.
-Opis kolumn: docs/dane_csv.md. Format GUI: docs/format_danych_gui.md.
+Opis kolumn i formatu: docs/format_danych_gui.md.
 """
 
 import csv
