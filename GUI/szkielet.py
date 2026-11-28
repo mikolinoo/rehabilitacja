@@ -17,14 +17,12 @@ KOLORY_HEX = {
     POZIOM_BRAK: "#9e9e9e",  # szary: staw nieanalizowany albo brak danych
 }
 
-
 def hex_na_bgr(kolor):
     """Zamienia '#rrggbb' na krotkę BGR (OpenCV używa BGR)."""
     czerwony = int(kolor[1:3], 16)
     zielony = int(kolor[3:5], 16)
     niebieski = int(kolor[5:7], 16)
     return (niebieski, zielony, czerwony)
-
 
 KOLORY_POZIOMOW_BGR = {poziom: hex_na_bgr(kolor) for poziom, kolor in KOLORY_HEX.items()}
 KOLOR_KRESEK = (255, 255, 255)  # jeden neutralny kolor wszystkich kresek (BGR: biały)
@@ -109,7 +107,6 @@ def rysuj_szkielet(klatka, landmarks, kolory):
             _kolko(obraz, piksele[nazwa], max(2, promien // 2), KOLOR_KONCOWKI)
 
     return obraz
-
 
 def _na_piksele(punkt, szerokosc, wysokosc):
     """(x, y) w pikselach albo None, gdy punkt nie istnieje, jest słaby albo daleko poza kadrem."""

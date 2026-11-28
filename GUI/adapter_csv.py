@@ -23,10 +23,8 @@ NAZWY_PUNKTOW = (
 )
 KOLUMNY_WYMAGANE = ("frame", "time_s") + tuple(f"{nazwa}_{os}" for nazwa in NAZWY_PUNKTOW for os in ("x", "y"))
 
-
 class BladCsv(ValueError):
     """Plik CSV nie pasuje do oczekiwanego formatu. Komunikat trafia do paska stanu."""
-
 
 def wczytaj_csv_landmarks(sciezka):
     """Czyta CSV → {numer klatki: wynik w formacie GUI}. Błędy jako BladCsv z numerem wiersza."""
@@ -62,7 +60,6 @@ def wczytaj_csv_landmarks(sciezka):
         raise BladCsv("plik nie zawiera żadnych wierszy z danymi")
     return wyniki
 
-
 def _wiersz_na_wynik(wiersz, numer_wiersza):
     """Zamienia jeden wiersz CSV na wynik klatki. Kąty i SI zostają None."""
     numer = int(_liczba(wiersz["frame"], "frame", numer_wiersza))
@@ -92,17 +89,14 @@ def _wiersz_na_wynik(wiersz, numer_wiersza):
         "landmarks": landmarks or None,  # cały wiersz bez punktów = brak osoby w kadrze
     }
 
-
 def _pusta(tekst):
     """True dla komórki pustej albo brakującej (None)."""
     return tekst is None or tekst.strip() == ""
-
 
 def _komorka(tekst):
     """Tekst komórki bez spacji. Pusta komórka daje None."""
     tekst = tekst.strip()
     return tekst if tekst else None
-
 
 def _liczba(tekst, kolumna, numer_wiersza):
     """Zamienia tekst na liczbę. Pusta albo nieliczbowa komórka to czytelny BladCsv."""

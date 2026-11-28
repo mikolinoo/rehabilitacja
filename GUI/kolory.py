@@ -24,7 +24,6 @@ TEKST_STATUSU = {
     POZIOM_BRAK: "—",
 }
 
-
 def ocena_si(si, warning=PROG_OSTRZEZENIA_DOMYSLNY, alarm=PROG_ALARMU_DOMYSLNY):
     """Zwraca (poziom, (kolor_tla, kolor_tekstu), tekst_statusu) dla wartości SI.
 
