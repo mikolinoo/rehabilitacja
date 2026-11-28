@@ -18,18 +18,18 @@ Funkcję, która dla **jednej klatki** obrazu zwraca:
 
 Funkcja nie musi zapisywać CSV ani pokazywać okna z kamerą. Ma zwrócić wynik jako słownik w formacie opisanym w `docs/format_danych_gui.md`.
 
-## Co zrobić w programie (krok po kroku)
+## Co uzupełnić
 
-1. Wklej kod analizy do nowego pliku `GUI/potok_analiza.py`.
-2. W `GUI/potok.py` dopisz klasę `PotokAnaliza`. Dziedziczy po `PotokBazowy`, więc musi mieć trzy metody:
+1. Wkleić kod analizy do nowego pliku `GUI/potok_analiza.py`.
+2. W `GUI/potok.py` dopisać klasę `PotokAnaliza`. Dziedziczy po `PotokBazowy`, więc musi mieć trzy metody:
    - `opis_zrodla` – krótka informacja dla paska stanu (typ, nazwa),
    - `analizuj_klatke` – weź klatkę, wywołaj funkcję z kodu analizy i zwróć wynik w formacie GUI,
    - `przelicz_lekkie` – zwróć średnią SI i zdarzenia z wyników całego filmu (liczy je kod analizy).
-3. Wczytaj model rozpoznawania (MediaPipe) **raz**, w konstruktorze klasy, nie przy każdej klatce. Inaczej program będzie bardzo wolny.
-4. W funkcji `wybierz_potok` dodaj warunek, kiedy używać `PotokAnaliza`.
-5. Uruchom program na krótkim filmie i sprawdź, czy punkty pojawiają się na obrazie, a wykres i zdarzenia mają sens.
+3. Wczytać model rozpoznawania (MediaPipe) **raz**, w konstruktorze klasy, nie przy każdej klatce. Inaczej program będzie bardzo wolny.
+4. W funkcji `wybierz_potok` dodac warunek, kiedy używać `PotokAnaliza`.
+5. Uruchomić program na krótkim filmie i sprawdzić, czy punkty pojawiają się na obrazie, a wykres i zdarzenia mają sens.
 
-Po udanym podłączeniu usuń atrapę (`PotokAtrapa` i jej funkcje w `potok.py`). Odczyt CSV usuń, jeśli nie będzie już potrzebny.
+Po udanym podłączeniu usunięcie atrapy (`PotokAtrapa` i jej funkcje w `potok.py`). Odczyt CSV usuń, jeśli nie będzie już potrzebny.
 
 ## Do ustalenia
 
