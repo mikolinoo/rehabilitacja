@@ -25,11 +25,7 @@ TYPY_CWICZEN = [
 
 
 class SettingsPanel(QWidget):
-    """Panel ustawień: progi SI, typ ćwiczenia i analizowane stawy.
-
-    Panel tylko zbiera wybory użytkownika i wysyła je sygnałem. Nic nie liczy
-    i nic nie rysuje – to robią inne widżety po odebraniu sygnału w MainWindow.
-    """
+    """Panel ustawień: progi SI, typ ćwiczenia, stawy. Wysyła wybory sygnałem."""
 
     # Wysyłany po każdej zmianie. Słownik ma format z docs/format_danych_gui.md.
     ustawienia_zmienione = Signal(dict)
@@ -37,8 +33,7 @@ class SettingsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        # Pola tworzymy i ustawiamy wartości PRZED podłączeniem sygnałów,
-        # żeby samo utworzenie panelu nie wysyłało zmiany.
+        # Wartości ustawiamy przed podłączeniem sygnałów, żeby start nie wysłał zmiany
         self._uwaga = self._utworz_prog(PROG_OSTRZEZENIA_DOMYSLNY)
         self._alarm = self._utworz_prog(PROG_ALARMU_DOMYSLNY)
         self._uwaga.valueChanged.connect(self._zmieniono_uwage)
@@ -73,8 +68,7 @@ class SettingsPanel(QWidget):
         przycisk = QPushButton("Przywróć domyślne")
         przycisk.clicked.connect(self._przywroc_domyslne)
 
-        # Trzy sekcje obok siebie (kolumnami), a nie jedna pod drugą. Dzięki temu panel jest niski
-        # i zostaje więcej miejsca na listę ostrzeżeń w panelu bocznym.
+        # Trzy sekcje obok siebie, żeby panel był niski
         kolumny = QHBoxLayout()
         kolumny.addWidget(grupa_stawy)
         kolumny.addWidget(grupa_typ)

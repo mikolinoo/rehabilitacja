@@ -53,11 +53,7 @@ def formatuj_czas_ostrzezenia(sekundy):
 
 
 class SidePanel(QWidget):
-    """Panel boczny: symetria ogólna, tabela kątów i SI oraz lista ostrzeżeń.
-
-    Panel pokazuje gotowe dane z wyniku klatki (angles i si) oraz listę zdarzeń.
-    Nic nie liczy. Odświeża go MainWindow przy każdej klatce z workera.
-    """
+    """Panel boczny: symetria ogólna, tabela kątów i SI, lista ostrzeżeń. Tylko wyświetla."""
 
     # Sygnał po kliknięciu wpisu na liście: słownik zdarzenia (format z gui_data_format)
     wybrano_zdarzenie = Signal(dict)
@@ -89,9 +85,7 @@ class SidePanel(QWidget):
             self._tabela.setItem(wiersz, 0, QTableWidgetItem(NAZWY_STAWOW.get(staw, staw)))
             self._ustaw_nazwe(wiersz, staw)
 
-        # Lista zdarzeń posortowana po czasie startu. Trzymamy ją też jako zwykłą listę Pythona,
-        # żeby wiedzieć, która pozycja odpowiada któremu wpisowi po kliknięciu.
-        self._zdarzenia = []
+        self._zdarzenia = []  # ta sama kolejność co lista widżetów (do kliknięć)
         self._lista_ostrzezen = QListWidget()
         self._lista_ostrzezen.itemClicked.connect(self._klikniecie_wpisu)
         self._etykieta_ostrzezen = QLabel()  # licznik, tekst ustawia _odswiez_licznik
@@ -157,10 +151,7 @@ class SidePanel(QWidget):
         self.wyczysc_zdarzenia()
 
     def dodaj_zdarzenie(self, zdarzenie):
-        """Dodaje wpis na listę we właściwym miejscu, według czasu startu.
-
-        Wstawiamy jeden wpis zamiast przebudowywać całą listę, więc reszta się nie przeładowuje.
-        """
+        """Wstawia wpis w kolejności czasu startu."""
         starty = [z.get("start") or 0.0 for z in self._zdarzenia]
         pozycja = bisect_right(starty, zdarzenie.get("start") or 0.0)
         self._zdarzenia.insert(pozycja, zdarzenie)

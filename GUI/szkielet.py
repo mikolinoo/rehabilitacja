@@ -19,10 +19,7 @@ KOLORY_HEX = {
 
 
 def hex_na_bgr(kolor):
-    """Zamienia '#rrggbb' na krotkę (niebieski, zielony, czerwony), czyli kolejność BGR.
-
-    OpenCV zapisuje kolory jako BGR, a nie RGB. Gdybyśmy podali RGB, czerwony byłby niebieski.
-    """
+    """Zamienia '#rrggbb' na krotkę BGR (OpenCV używa BGR)."""
     czerwony = int(kolor[1:3], 16)
     zielony = int(kolor[3:5], 16)
     niebieski = int(kolor[5:7], 16)
@@ -65,11 +62,7 @@ MARGINES_KADRU = 0.1  # punkt do 10 % poza krawędzią jeszcze rysujemy; dalej t
 
 
 def kolory_stawow(si, analizowane, warning, alarm):
-    """Kolor kółka dla każdego stawu (BGR). Poziom liczy ocena_si wg aktualnych progów.
-
-    si         – słownik SI z wyniku klatki (albo None)
-    analizowane – stawy wybrane w ustawieniach; pozostałe są szare
-    """
+    """Kolor kółka (BGR) dla każdego stawu. Nieanalizowane i brak danych – szare."""
     kolory = {}
     for staw in DEFAULT_JOINTS:
         wartosc = (si or {}).get(staw)
@@ -82,13 +75,8 @@ def kolory_stawow(si, analizowane, warning, alarm):
 
 
 def rysuj_szkielet(klatka, landmarks, kolory):
-    """Zwraca NOWĄ klatkę z narysowanym szkieletem. Oryginał (klatka) zostaje bez zmian.
-
-    klatka     – obraz BGR (numpy, wysokość × szerokość × 3)
-    landmarks  – słownik nazwa → (x, y, visibility) albo None, gdy nie ma osoby
-    kolory     – słownik staw → kolor BGR (z kolory_stawow)
-    """
-    obraz = klatka.copy()  # rysujemy na kopii, żeby kolejna klatka nie dostała kresek z poprzedniej
+    """Zwraca kopię klatki z narysowanym szkieletem (landmarks: nazwa → (x, y, vis) albo None)."""
+    obraz = klatka.copy()
     if not landmarks:
         return obraz  # brak osoby w kadrze: wracamy z samą klatką
 

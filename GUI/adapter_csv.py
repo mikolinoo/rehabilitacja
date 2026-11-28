@@ -29,11 +29,7 @@ class BladCsv(ValueError):
 
 
 def wczytaj_csv_landmarks(sciezka):
-    """Czyta CSV i zwraca słownik {numer klatki: wynik klatki w formacie GUI}.
-
-    Pusta para x/y to brak punktu w tej klatce. Wiersz bez żadnej wartości jest pomijany.
-    Błędy zgłaszamy jako BladCsv z numerem wiersza, żeby dało się go znaleźć w pliku.
-    """
+    """Czyta CSV → {numer klatki: wynik w formacie GUI}. Błędy jako BladCsv z numerem wiersza."""
     try:
         plik = open(sciezka, newline="", encoding="utf-8-sig")  # utf-8-sig zjada ewentualny znacznik BOM
     except OSError as blad:

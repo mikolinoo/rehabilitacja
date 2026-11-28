@@ -3,11 +3,21 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QMetaObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QSplitter, QToolBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QLabel,
+    QMainWindow,
+    QProgressBar,
+    QPushButton,
+    QSplitter,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
 
+from GUI.analiza_worker import AnalizaWorker
 from GUI.gui_data_format import bezpieczny_odczyt
 from GUI.kolory import PROG_ALARMU_DOMYSLNY, PROG_OSTRZEZENIA_DOMYSLNY
-from GUI.mock_worker import MockWorker
 from GUI.seek_bar import SeekBar
 from GUI.settings_panel import SettingsPanel
 from GUI.side_panel import SidePanel
@@ -47,30 +57,25 @@ class MainWindow(QMainWindow):
     sygnal_przewin = Signal(int)  # numer klatki, do której przewijamy
     sygnal_ustawienia = Signal(dict)  # progi, typ ćwiczenia i stawy (format z format_danych_gui.md)
     sygnal_wczytaj_csv = Signal(str)  # ścieżka do CSV z punktami dla otwartego filmu
+    sygnal_anuluj = Signal()  # przerwanie analizy całego filmu
 
     def __init__(self):
         super().__init__()  # konstruktor QMainWindow; bez tego okno się nie zbuduje
         self.setWindowTitle("Analiza symetrii – rehabilitacja")
         self.resize(1100, 700)
 
-        # Wyniki klatek w słowniku {numer klatki: wynik}. Ponowne odczytanie tej samej klatki
-        # nadpisuje jej wpis zamiast dodawać duplikat. Słownik pamięta kolejność dodawania,
-        # więc pierwszy wpis to najstarszy (tego używamy przy usuwaniu nadmiaru).
-        self._wyniki = {}
-        # Zdarzenia asymetrii w jednym miejscu: {(staw, czas startu): zdarzenie}. Klucz zapobiega duplikatom,
-        # bo po przewinięciu do tyłu i ponownym odtworzeniu worker wysyła to samo zdarzenie jeszcze raz.
-        self._zdarzenia = {}
-        self._ostatnie_stawy = None  # stawy, z których liczona była krzywa w buforze
+        self._wyniki = {}  # {numer klatki: wynik}; najstarszy wpis jest pierwszy
+        self._zdarzenia = {}  # {(staw, start): zdarzenie}
         self._wyniki_zmienione = False  # czy wykres trzeba przerysować przy najbliższym odświeżeniu
         self._biezaca_klatka = 0  # numer klatki, którą właśnie pokazujemy
         self._ostatni_czas = 0.0
         self._na_koncu = False  # True, gdy odtwarzanie dobiegło końca
-        # Ostatnio pokazana klatka (surowa, bez szkieletu) i jej wynik. Dzięki temu po zmianie przełącznika
-        # albo progów przerysowujemy tę samą klatkę, także w pauzie.
-        self._ostatnia = None
+        self._ostatnia = None  # ostatnia klatka i jej wynik, do przerysowania
         self._pokaz_szkielet = True  # stan przełącznika „Pokaż szkielet”
         self._progi = (PROG_OSTRZEZENIA_DOMYSLNY, PROG_ALARMU_DOMYSLNY)  # (uwaga, alarm) do kolorów kółek
         self._analizowane = []  # stawy wybrane w ustawieniach, ustawiane w _na_ustawienia
+        self._film_gotowy = False  # worker potwierdził otwarcie pliku
+        self._zajete = False  # trwa otwieranie albo analiza (blokady: _odswiez_blokady)
 
         # Informacje o otwartym pliku. Ustawiamy je, gdy worker potwierdzi otwarcie.
         self._sciezka_filmu = None  # pełna ścieżka, potrzebna do ustawienia folderu w oknie „Wczytaj CSV”
@@ -107,8 +112,7 @@ class MainWindow(QMainWindow):
 
         pasek.addAction(QAction("Kamera", self))  # jeszcze bez działania
 
-        # Start/Stop działa jak przełącznik odtwarzania: wciśnięty oznacza grę, zwolniony pauzę.
-        # Napis zmienia się razem ze stanem: „Start”, gdy stoi, i „Stop”, gdy gra.
+        # Przycisk przełącznik: wciśnięty = gra, zwolniony = pauza
         self._akcja_start = QAction("Start", self)
         self._akcja_start.setCheckable(True)
         self._akcja_start.toggled.connect(self._przelacz_start_stop)
@@ -118,18 +122,18 @@ class MainWindow(QMainWindow):
         pasek.addAction(self._akcja_start)
 
         # Reset wraca na pierwszą klatkę i czyści wyniki
-        akcja_reset = QAction("Reset", self)
-        akcja_reset.triggered.connect(self._reset)
-        pasek.addAction(akcja_reset)
+        self._akcja_reset = QAction("Reset", self)
+        self._akcja_reset.triggered.connect(self._reset)
+        pasek.addAction(self._akcja_reset)
 
-        # Przełącznik szkieletu: domyślnie włączony. Zmiana od razu przerysowuje bieżącą klatkę.
         self._akcja_szkielet = QAction("Pokaż szkielet", self)
         self._akcja_szkielet.setCheckable(True)
-        self._akcja_szkielet.setChecked(True)  # ustawiamy przed podłączeniem sygnału, więc bez wywołania
+        self._akcja_szkielet.setChecked(True)
         self._akcja_szkielet.toggled.connect(self._przelacz_szkielet)
         pasek.addAction(self._akcja_szkielet)
 
-        pasek.addAction(QAction("Eksport", self))  # jeszcze bez działania
+        self._akcja_eksport = QAction("Eksport", self)  # jeszcze bez działania
+        pasek.addAction(self._akcja_eksport)
 
     # Układ: trzy QSplitter zagnieżdżone w sobie--------------------
     def _utworz_uklad(self):
@@ -196,19 +200,21 @@ class MainWindow(QMainWindow):
         self._timeline.kliknieto_czas.connect(self._na_klik_wykres)
         return self._timeline
 
-    def _zaslepka(self, tekst, kolor):
-        """Zwraca QLabel z napisem i kolorem tła. To tymczasowy placeholder."""
-        etykieta = QLabel(tekst)
-        etykieta.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        etykieta.setStyleSheet(f"background-color: {kolor}; color: black; font-size: 14px;")
-        etykieta.setMinimumSize(80, 60)  # żeby splitter nie zwinął panelu do zera
-        return etykieta
-
     # ------------------------------------------------------------------
     # Pasek stanu: po lewej komunikaty, po prawej stały licznik (nazwa, fps, czas)
     def _utworz_pasek_stanu(self):
+        # Pasek postępu i Anuluj są widoczne tylko podczas analizy
+        self._pasek_postepu = QProgressBar()
+        self._pasek_postepu.setFormat("Analiza: %v/%m klatek")
+        self._pasek_postepu.setFixedWidth(240)
+        self._pasek_postepu.setVisible(False)
+        self._przycisk_anuluj = QPushButton("Anuluj")
+        self._przycisk_anuluj.clicked.connect(self._anuluj_analize)
+        self._przycisk_anuluj.setVisible(False)
         self._etykieta_czasu = QLabel("Czas: 0.0 s")
         # 'permanent' oznacza, że widżet nie znika razem z komunikatem
+        self.statusBar().addPermanentWidget(self._pasek_postepu)
+        self.statusBar().addPermanentWidget(self._przycisk_anuluj)
         self.statusBar().addPermanentWidget(self._etykieta_czasu)
 
     def _aktualizuj_etykiete(self):
@@ -237,10 +243,9 @@ class MainWindow(QMainWindow):
 
     # Wątek workera-------------------------------------------------
     def _utworz_watek(self):
-        # QThread to osobny wątek, czyli równoległa ścieżka programu. Przenosimy do niego
-        # workera, żeby odczyt i przetwarzanie wideo nie zamrażały okna.
+        # Worker działa w osobnym wątku, żeby analiza nie zamrażała okna
         self._watek = QThread()
-        self._worker = MockWorker()
+        self._worker = AnalizaWorker()
         self._worker.moveToThread(self._watek)  # od tej chwili sloty workera działają w _watek
         self._watek.start()  # uruchamia pętlę zdarzeń wątku, która czeka na polecenia
 
@@ -252,13 +257,17 @@ class MainWindow(QMainWindow):
         self.sygnal_przewin.connect(self._worker.seek)
         self.sygnal_ustawienia.connect(self._worker.set_settings)
         self.sygnal_wczytaj_csv.connect(self._worker.wczytaj_csv)
+        self.sygnal_anuluj.connect(self._worker.anuluj)
 
         # worker -> GUI
         self._worker.source_opened.connect(self._na_zrodlo)
         self._worker.dane_zrodla.connect(self._na_dane_zrodla)
         self._worker.frame_processed.connect(self._na_klatke)
+        self._worker.analiza_start.connect(self._na_analiza_start)
+        self._worker.postep.connect(self._na_postep)
+        self._worker.analiza_zakonczona.connect(self._na_analiza_zakonczona)
         self._worker.event_detected.connect(self._na_zdarzenie)
-        self._worker.wyniki_calego_filmu.connect(self._na_caly_film)  # tryb CALY_FILM_OD_RAZU
+        self._worker.wyniki_calego_filmu.connect(self._na_caly_film)
         self._worker.error.connect(self._na_blad)
         self._worker.finished.connect(self._na_koniec)
 
@@ -272,12 +281,13 @@ class MainWindow(QMainWindow):
         if not sciezka:  # użytkownik kliknął Anuluj
             return
         self._akcja_start.setChecked(False)  # nowy film zaczyna się w pauzie
-        # Blokujemy Start do potwierdzenia otwarcia. Gdyby plik się nie otworzył, nie odtworzymy pustego źródła.
-        self._akcja_start.setEnabled(False)
-        self._akcja_csv.setEnabled(False)
+        # Od tej chwili do końca analizy (albo błędu) kontrolki są zablokowane. Start wróci dopiero po analizie.
+        self._film_gotowy = False
+        self._zajete = True
         self._info_danych = None
         self._suwak.ustaw_zakres(None, None)  # suwak nieaktywny do potwierdzenia otwarcia
         self._wyczysc_wyniki()
+        self._odswiez_blokady()
         self.sygnal_otworz.emit(sciezka)
         self.statusBar().showMessage(f"Otwieranie: {Path(sciezka).name}")
 
@@ -309,6 +319,9 @@ class MainWindow(QMainWindow):
         return self._liczba_klatek is not None and self._biezaca_klatka >= self._liczba_klatek - 1
 
     def _przewin_do_klatki(self, numer):
+        # W trakcie analizy wyniki są nieaktualne, więc przewijanie (suwak, wykres, lista) jest wyłączone
+        if self._zajete:
+            return
         # Ręczne przewinięcie kasuje znacznik „koniec”, więc Start gra od wybranego miejsca
         self._na_koncu = False
         self.sygnal_przewin.emit(numer)
@@ -365,15 +378,14 @@ class MainWindow(QMainWindow):
         self._liczba_klatek = info["frame_count"]
         self._timeline.ustaw_zakres_czasu(self._dlugosc)
         self._suwak.ustaw_zakres(self._liczba_klatek, self._fps)
-        self._akcja_start.setEnabled(True)  # film jest, więc można odtwarzać
+        self._film_gotowy = True
+        self._odswiez_blokady()  # Start i Wczytaj CSV wracają, o ile analiza już nie trwa
         self._akcja_start.setToolTip("")
-        self._akcja_csv.setEnabled(True)  # film jest, więc można dopasować CSV
         self._akcja_csv.setToolTip("")
         self._aktualizuj_etykiete()
 
     def _na_dane_zrodla(self, info):
-        # Nowe dane (CSV albo atrapa) zastępują wszystko, co liczyliśmy wcześniej, bo wyniki i zdarzenia
-        # z poprzedniego źródła nie pasują do nowego. Worker wyśle wyniki zaraz po tym sygnale.
+        # Nowe źródło kasuje stare wyniki; worker wyśle nowe zaraz potem
         self._info_danych = info
         self._wyniki.clear()
         self._wyniki_zmienione = True
@@ -398,10 +410,7 @@ class MainWindow(QMainWindow):
         self._odswiez_pozycje()
 
     def _pokaz_klatke(self):
-        """Jedno miejsce, przez które klatka trafia na ekran: najpierw szkielet, potem wyświetlenie.
-
-        rysuj_szkielet tworzy kopię klatki, więc oryginał z workera zostaje czysty i nie dostaje kresek z poprzednich klatek.
-        """
+        """Jedyne miejsce wyświetlania klatki: najpierw szkielet (na kopii), potem pokazanie."""
         if self._ostatnia is None:
             return  # jeszcze żadnej klatki nie było
         ramka, wynik = self._ostatnia
@@ -449,12 +458,7 @@ class MainWindow(QMainWindow):
         self._progi = (progi["warning"], progi["alarm"])
         self._pokaz_klatke()
         self._timeline.ustaw_opis_stawow(stawy)
-        # Krzywa SI to średnia z wybranych stawów, więc zmiana wyboru unieważnia bufor.
-        # Zmiana samych progów tego nie robi (zmieniają tylko kolory).
-        if stawy != self._ostatnie_stawy:
-            self._ostatnie_stawy = stawy
-            self._wyniki.clear()
-            self._wyniki_zmienione = True  # wykres zostanie przerysowany w najbliższym odświeżeniu
+        # Średnią SI i zdarzenia przelicza worker i sam wysyła nowy wynik, więc bufor tu nie jest czyszczony
         self._panel.ustaw_stawy(stawy)
         self.sygnal_ustawienia.emit(ustawienia)
 
@@ -474,7 +478,55 @@ class MainWindow(QMainWindow):
 
     def _na_blad(self, tekst):
         self._akcja_start.setChecked(False)  # zatrzymujemy odtwarzanie; ustawia to też komunikat „Pauza”
+        # Błąd kończy też otwieranie i analizę, więc odblokowujemy kontrolki
+        self._zajete = False
+        self._ukryj_postep()
+        self._odswiez_blokady()
         self.statusBar().showMessage(f"Błąd: {tekst}")  # komunikat błędu wysyłamy na końcu, żeby go nie nadpisało
+
+    # Blokady kontrolek i analiza całego filmu---------------------------
+    def _odswiez_blokady(self):
+        """Jedno miejsce, które włącza i wyłącza kontrolki: zależą od tego, czy film gotowy i czy trwa analiza."""
+        gotowe = self._film_gotowy and not self._zajete
+        self._akcja_start.setEnabled(gotowe)
+        self._akcja_csv.setEnabled(gotowe)
+        self._suwak.setEnabled(gotowe)
+        self._akcja_reset.setEnabled(not self._zajete)
+        self._akcja_eksport.setEnabled(not self._zajete)
+        self._panel_ustawien.setEnabled(not self._zajete)
+
+    def _na_analiza_start(self, razem):
+        # Worker zaczął analizę całego filmu. Stare wyniki są nieaktualne, więc je czyścimy.
+        self._zajete = True
+        self._akcja_start.setChecked(False)  # w trakcie analizy film nie gra
+        self._wyczysc_wyniki()
+        self._pasek_postepu.setMaximum(razem)
+        self._pasek_postepu.setValue(0)
+        self._pasek_postepu.setVisible(True)
+        self._przycisk_anuluj.setEnabled(True)
+        self._przycisk_anuluj.setVisible(True)
+        self._odswiez_blokady()
+        self.statusBar().showMessage("Analiza całego filmu…")
+
+    def _na_postep(self, numer):
+        self._pasek_postepu.setValue(numer)
+
+    def _na_analiza_zakonczona(self, dokonczona):
+        self._zajete = False
+        self._ukryj_postep()
+        self._odswiez_blokady()
+        if dokonczona:
+            self.statusBar().showMessage("Analiza gotowa – Start odtworzy film, zmiana progów działa od razu")
+        else:
+            self.statusBar().showMessage("Analiza anulowana – Reset uruchomi ją od nowa")
+
+    def _anuluj_analize(self):
+        self._przycisk_anuluj.setEnabled(False)  # drugi klik nic by nie zmienił
+        self.sygnal_anuluj.emit()
+
+    def _ukryj_postep(self):
+        self._pasek_postepu.setVisible(False)
+        self._przycisk_anuluj.setVisible(False)
 
     def _na_koniec(self):
         # Film dobiegł końca: zostajemy na ostatniej klatce, a przycisk wraca do „Start”
@@ -498,12 +550,7 @@ class MainWindow(QMainWindow):
         self._aktualizuj_etykiete()
 
     def _dane_wykresu(self):
-        """Zamienia słownik wyników na dwie tablice (czas, SI) w kolejności numerów klatek.
-
-        Gdy między dwoma kolejnymi wynikami brakuje klatek (np. po przewinięciu do przodu),
-        wstawiamy pusty punkt (NaN). Wykres wtedy urywa linię zamiast łączyć dwa odległe
-        miejsca prostą. Dane w buforze nie są kasowane, więc po powrocie linia się uzupełnia.
-        """
+        """Bufor → dwie tablice (czas, SI). Dziury między klatkami zamienia na NaN (przerwa w linii)."""
         czasy = []
         si_wartosci = []
         poprzedni_numer = None

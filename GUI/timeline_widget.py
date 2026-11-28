@@ -65,12 +65,7 @@ def _klucz_zdarzenia(zdarzenie):
 
 
 class TimelineWidget(pg.PlotWidget):
-    """Wykres surowych wartości SI (wskaźnika symetrii) w czasie nagrania.
-
-    PlotWidget to gotowy widżet wykresu z biblioteki pyqtgraph, z osiami, siatką
-    i obszarem do rysowania. Dziedziczymy po nim, żeby nasza klasa sama była
-    wykresem i miała dodatkowe metody (np. set_data).
-    """
+    """Wykres SI w czasie: krzywa, progi, kursor i pasy zdarzeń (na bazie pyqtgraph PlotWidget)."""
 
     # Sygnał wysyłany po kliknięciu w wykres: czas w sekundach (float)
     kliknieto_czas = Signal(float)
@@ -79,20 +74,15 @@ class TimelineWidget(pg.PlotWidget):
         super().__init__(parent)  # konstruktor PlotWidget; bez tego wykres się nie zbuduje
         self.setMinimumSize(80, 60)  # żeby splitter nie zwinął panelu do zera
 
-        # Wygląd: białe tło, siatka i opisy osi.
-        # Zakresu osi Y nie ustawiamy na sztywno. pyqtgraph dopasowuje go do danych,
-        # więc wartości ujemne też będą widoczne.
         self.setBackground("w")
         self.showGrid(x=True, y=True, alpha=0.3)
         self.setLabel("bottom", "Czas", units="s")
         self.setLabel("left", "Wskaźnik symetrii SI", units="%")
 
-        # Linia zerowa oznacza 0 %, czyli pełną symetrię. To punkt odniesienia, a nie limit.
-        # Dzięki niej od razu widać, które wartości są dodatnie, a które ujemne.
+        # Linia zerowa = 0 % (pełna symetria)
         self.addItem(pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(color="#555555", width=1)))
 
-        # Pionowa linia kursora pokazuje, w którym miejscu nagrania jest odtwarzanie.
-        # Nie da się jej przeciągnąć myszą, przesuwamy ją metodą ustaw_kursor.
+        # Kursor czasu (przesuwa go ustaw_kursor)
         self._kursor = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color="#d62728", width=2))
         self.addItem(self._kursor)
 
@@ -100,8 +90,7 @@ class TimelineWidget(pg.PlotWidget):
         self._linia_uwagi = self._utworz_linie_progu("Uwaga", KOLOR_WYKRESU[POZIOM_UWAGA])
         self._linia_alarmu = self._utworz_linie_progu("Alarm", KOLOR_WYKRESU[POZIOM_ALARM])
 
-        # Krzywa SI jest na początku pusta. Dane dostaje przez set_data().
-        # Kolor zależy od poziomu: każdy poziom to osobna krzywa, a punkty spoza poziomu są NaN (niewidoczne).
+        # Osobna krzywa na każdy poziom; punkty spoza poziomu są NaN
         self._krzywe = {
             POZIOM_OK: self.plot(pen=pg.mkPen(color=KOLOR_WYKRESU[POZIOM_OK], width=2)),
             POZIOM_UWAGA: self.plot(pen=pg.mkPen(color=KOLOR_WYKRESU[POZIOM_UWAGA], width=2)),
@@ -131,22 +120,17 @@ class TimelineWidget(pg.PlotWidget):
         self._rysuj()
 
     def _rysuj(self):
-        """Rysuje krzywą w kolorach poziomów wg aktualnych progów."""
+        """Rysuje krzywą w kolorach poziomów wg progów (te same reguły co kolory.ocena_si)."""
         times, si = self._ostatnie_dane
         warning, alarm = self._progi
-        # Te same reguły co w kolory.ocena_si: alarm ma pierwszeństwo.
-        # NaN (brak danych) nie spełnia żadnego porównania, więc zostaje przerwa w linii.
         poziomy = {
             POZIOM_ALARM: si >= alarm,
             POZIOM_UWAGA: (si >= warning) & (si < alarm),
             POZIOM_OK: si < warning,
         }
         for poziom, krzywa in self._krzywe.items():
-            # Poza swoim poziomem punkt znika, ale z jednym sąsiadem na granicy (patrz _z_sasiadami)
             wartosci = np.where(_z_sasiadami(poziomy[poziom]), si, np.nan)
-            # setData zastępuje poprzednią krzywą; connect="finite" robi przerwy zamiast prostych do zera
             krzywa.setData(times, wartosci, connect="finite")
-        # Zakres Y ustawiamy ręcznie, więc pyqtgraph go już nie dopasowuje sam
         dol, gora = _zakres_y(si, alarm)
         self.setYRange(dol, gora, padding=0)
 
@@ -181,11 +165,7 @@ class TimelineWidget(pg.PlotWidget):
         self.setTitle(f"Krzywa SI – {opis}")
 
     def dodaj_zdarzenie(self, zdarzenie):
-        """Rysuje pas od początku do końca zdarzenia z podpisem stawu.
-
-        Pas to LinearRegionItem: pionowy prostokąt między dwiema wartościami osi X.
-        Użytkownik go nie przesuwa (movable=False), a jego kolor zależy od poziomu zdarzenia.
-        """
+        """Pas od początku do końca zdarzenia z podpisem stawu."""
         kolor = KOLOR_WYKRESU.get(zdarzenie.get("level"), KOLOR_WYKRESU[POZIOM_UWAGA])
         pas = pg.LinearRegionItem(
             values=(zdarzenie["start"], zdarzenie["end"]),
@@ -197,9 +177,7 @@ class TimelineWidget(pg.PlotWidget):
         pas.setZValue(-5)  # pas idzie pod krzywą SI, żeby jej nie zasłaniał
 
         podpis = pg.TextItem(NAZWY_STAWOW.get(zdarzenie["joint"], zdarzenie["joint"]), color=kolor, anchor=(0, 0))
-        # ignoreBounds=True: pas i podpis nie biorą udziału w dopasowaniu zakresu osi Y.
-        # Bez tego podpis ustawiony na górze widoku podnosi zakres, a zakres podnosi podpis (pętla),
-        # i krzywa SI spłaszcza się do zera.
+        # ignoreBounds=True: pas i podpis nie zmieniają zakresu osi Y (inaczej krzywa się spłaszcza)
         self.addItem(pas, ignoreBounds=True)
         self.addItem(podpis, ignoreBounds=True)
         self._pasy.append({"zdarzenie": zdarzenie, "kolor": kolor, "pas": pas, "podpis": podpis})
