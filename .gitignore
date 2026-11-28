@@ -4,5 +4,5 @@ __pycache__/
 *.mp4
 *.avi
 *.csv
-dosc/*.md
+docs/*.md
 CLAUDE.md
